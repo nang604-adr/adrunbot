@@ -1757,10 +1757,15 @@ async function commitPayroll() {
     const data = await res.json();
     if (!res.ok) return toast(data.error || "บันทึกไม่สำเร็จ", "err");
 
-    // Generate Excel using cached preview data
-    generatePayrollExcel(payrollPreview, data.payId, data.committedAt, adminName);
-
-    toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
+    // ★ v1.16: ถ้า LIFF mobile → server-side download
+    if (isLiffMobile()) {
+      const url = `${location.origin}/api/export/payroll/${encodeURIComponent(data.payId)}`;
+      openExternal(url);
+      toast(`✅ บันทึก ${data.records} รายการ — เปิดในเบราว์เซอร์เพื่อดาวน์โหลด`, "ok");
+    } else {
+      generatePayrollExcel(payrollPreview, data.payId, data.committedAt, adminName);
+      toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
+    }
     payrollPreview = null;
     document.getElementById("payPreviewArea").innerHTML = "";
     await loadPayrollHistory();
@@ -1821,7 +1826,7 @@ async function undoPayroll(payId) {
     });
     const data = await res.json();
     if (!res.ok) return toast(data.error || "Undo ไม่สำเร็จ", "err");
-    toast(`↺ ยกเลิก ${data.recordsRestored} รายการ`, "ok");
+    toast(`✅ ยกเลิกรอบจ่าย — ${data.recordsRestored} รายการกลับเป็น "รอจ่าย" แล้ว`, "ok");
     await loadPayrollHistory();
     await loadAdmin();
   } catch (e) {
@@ -1830,6 +1835,24 @@ async function undoPayroll(payId) {
 }
 
 // ── Excel Export Helpers ─────────────────────────────────
+// ★ v1.16: เช็คว่าอยู่ใน LIFF mobile inApp browser ที่ block download
+function isLiffMobile() {
+  try {
+    if (!window.liff || !liff.isInClient || !liff.isInClient()) return false;
+    const os = liff.getOS && liff.getOS();
+    return os === "ios" || os === "android";
+  } catch (e) { return false; }
+}
+
+// ★ v1.16: เปิด URL ในเบราว์เซอร์ภายนอก (สำหรับ download ใน LIFF mobile)
+function openExternal(url) {
+  if (window.liff && liff.openWindow) {
+    liff.openWindow({ url, external: true });
+  } else {
+    window.open(url, "_blank");
+  }
+}
+
 // ★ v1.15.3: Robust download with fallback
 function downloadXlsx(wb, filename) {
   if (typeof XLSX === "undefined") {
@@ -1925,6 +1948,18 @@ function generatePayrollExcel(preview, payId, committedAt, adminName) {
 
 // ── Monthly Export (Option C) ─────────────────────────────
 function exportMonthlyExcel(employeeFilter) {
+  // ★ v1.16: ถ้าอยู่ใน LIFF mobile → ใช้ server-side endpoint + เปิดใน browser ภายนอก
+  if (isLiffMobile()) {
+    const d = new Date();
+    const mm = String(d.getMonth()+1).padStart(2,"0");
+    const yy = String(d.getFullYear()+543);
+    const url = `${location.origin}/api/export/monthly?month=${mm}&year=${yy}` + (employeeFilter ? `&employee=${encodeURIComponent(employeeFilter)}` : "");
+    openExternal(url);
+    toast("📥 เปิดในเบราว์เซอร์เพื่อดาวน์โหลด", "ok");
+    return;
+  }
+
+  // Desktop / external browser → generate ใน client (เร็วกว่า)
   const d = new Date();
   const monthLabel = MONTHS_SHORT[d.getMonth()];
   const yearLabel = d.getFullYear()+543;

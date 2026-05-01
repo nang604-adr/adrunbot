@@ -16,6 +16,7 @@ const line       = require("@line/bot-sdk");
 const { google } = require("googleapis");
 const path       = require("path");
 const crypto     = require("crypto");
+const XLSX       = require("xlsx");
 
 // ── LINE Config ──────────────────────────────────────────────
 const lineConfig = {
@@ -643,7 +644,172 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.1)"));
+// ══════════════════════════════════════════════════════════════
+// SERVER-SIDE EXCEL EXPORT (v1.16) — สำหรับ LIFF mobile
+// ══════════════════════════════════════════════════════════════
+
+// ── GET /api/export/monthly?employee=&month=&year= ──────────
+app.get("/api/export/monthly", async (req, res) => {
+  let { employee = "", month, year } = req.query;
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllRecords(sheets);
+    const d = new Date();
+    const mm = month || String(d.getMonth()+1).padStart(2,"0");
+    const yy = year  || String(d.getFullYear()+543);
+
+    const recs = all.filter(r => {
+      if (!r.name || !r.date) return false;
+      if (employee && r.name !== employee) return false;
+      const parts = r.date.split("/");
+      return parts[1] === mm && parts[2] === yy;
+    });
+
+    if (recs.length === 0) {
+      return res.status(404).send("ไม่มีข้อมูล OT ในเดือนนี้");
+    }
+
+    const wb = XLSX.utils.book_new();
+
+    // ── Summary ──
+    const byEmp = {};
+    recs.forEach(r => {
+      byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+      byEmp[r.name].days.add(r.date);
+      byEmp[r.name].count += 1;
+      byEmp[r.name].pay   += r.pay;
+      if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
+      else                          byEmp[r.name].holidays += 1;
+    });
+    const summary = Object.values(byEmp).map(e => ({
+      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+      holidays: e.holidays, pay: e.pay, count: e.count,
+    })).sort((a,b) => b.pay - a.pay);
+
+    const sumRows = [
+      [`สรุป OT — เดือน ${mm}/${yy}` + (employee ? ` — ${employee}` : "")],
+      [],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด","ค่า OT (฿)"],
+    ];
+    summary.forEach((e, i) => sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay]));
+    sumRows.push([]);
+    sumRows.push([
+      "รวมทั้งหมด", "",
+      summary.reduce((s,e)=>s+e.days,0),
+      +summary.reduce((s,e)=>s+e.hours,0).toFixed(2),
+      summary.reduce((s,e)=>s+e.holidays,0),
+      summary.reduce((s,e)=>s+e.pay,0),
+    ]);
+    const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
+    ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:12},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+
+    // ── Details ──
+    const detailRows = [
+      ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชม.","งาน","สถานที่","ประเภท","ค่า (฿)","สถานะ"],
+    ];
+    recs.slice().sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date)).forEach(r => {
+      detailRows.push([
+        r.name, r.date, r.startTime, r.endTime, r.hours,
+        r.task||"", r.location||"", r.otType, r.pay,
+        r.paidAt ? "✅ จ่ายแล้ว" : "⏳ รอจ่าย",
+      ]);
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    const fname = (employee ? `OT_${employee}` : "OT_All") + `_${mm}-${yy}.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fname)}"`);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send(`Error: ${e.message}`);
+  }
+});
+
+// ── GET /api/export/payroll/:payId ─────────────────────────
+app.get("/api/export/payroll/:payId", async (req, res) => {
+  const { payId } = req.params;
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllRecords(sheets);
+    const recs   = all.filter(r => r.paidAt === payId);
+
+    if (recs.length === 0) {
+      return res.status(404).send(`ไม่พบ records ในรอบ ${payId}`);
+    }
+
+    // Get payroll metadata
+    const log = await getPayrollLog(sheets);
+    const meta = log.find(l => l.id === payId);
+    const cutoff = meta?.cutoff || "-";
+    const createdAt = meta?.paidAt || "-";
+    const createdBy = "Admin";
+
+    const wb = XLSX.utils.book_new();
+
+    // Summary
+    const byEmp = {};
+    recs.forEach(r => {
+      byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+      byEmp[r.name].days.add(r.date);
+      byEmp[r.name].count += 1;
+      byEmp[r.name].pay   += r.pay;
+      if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
+      else                          byEmp[r.name].holidays += 1;
+    });
+    const summary = Object.values(byEmp).map(e => ({
+      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+      holidays: e.holidays, pay: e.pay,
+    })).sort((a,b) => b.pay - a.pay);
+
+    const sumRows = [
+      ["ใบรายการจ่าย OT"],
+      ["รอบจ่าย:", cutoff, "", "Payroll ID:", payId],
+      ["จัดทำเมื่อ:", createdAt, "", "ทำโดย:", createdBy],
+      [],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด","ค่า OT (฿)"],
+    ];
+    summary.forEach((e, i) => sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay]));
+    sumRows.push([]);
+    sumRows.push([
+      "รวมทั้งหมด", "",
+      summary.reduce((s,e)=>s+e.days,0),
+      +summary.reduce((s,e)=>s+e.hours,0).toFixed(2),
+      summary.reduce((s,e)=>s+e.holidays,0),
+      summary.reduce((s,e)=>s+e.pay,0),
+    ]);
+    const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
+    ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:12},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+
+    // Details
+    const detailRows = [
+      ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชม.","งาน","สถานที่","ประเภท","ค่า (฿)","Payroll ID"],
+    ];
+    recs.slice().sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date)).forEach(r => {
+      detailRows.push([
+        r.name, r.date, r.startTime, r.endTime, r.hours,
+        r.task||"", r.location||"", r.otType, r.pay, payId,
+      ]);
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20}];
+    XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    const fname = `Payroll_${payId}.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fname)}"`);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send(`Error: ${e.message}`);
+  }
+});
+
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.16)"));
 
 // ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
 app.get("/liff", (_, res) => {
