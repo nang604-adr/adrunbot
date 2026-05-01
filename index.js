@@ -68,6 +68,10 @@ const WEEKDAY_MULTIPLIER = 1.5;
 const WORK_START_MIN = 8 * 60 + 30;   // 08:30 = 510
 const WORK_END_MIN   = 17 * 60 + 30;  // 17:30 = 1050
 
+// ★ v1.5: OT day = 06:00 ถึง 06:00 ของวันถัดไป (24 ชม.)
+const OT_DAY_START_MIN = 6 * 60;                  // 06:00 = 360
+const OT_DAY_END_MIN   = OT_DAY_START_MIN + 1440; // 06:00 next day = 1800
+
 // ★ data ทุก sheet เริ่มที่ row 3 (มี 2 header rows)
 const DATA_START_ROW = 3;
 
@@ -298,6 +302,10 @@ app.post("/api/ot", async (req, res) => {
     const hours = calcHours(startTime, endTime);
     if (hours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
 
+    // ★ v1.5: OT ต้องอยู่ในช่วง 06:00 ถึง 06:00 ของวันถัดไป
+    const otWindowErr = validateOTWindow(startTime, endTime);
+    if (otWindowErr) return res.status(400).json({ error: otWindowErr });
+
     // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ จันทร์–เสาร์ 08:30–17:30
     if (overlapsWorkHours(startTime, endTime)) {
       return res.status(400).json({ error: "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
@@ -489,18 +497,35 @@ async function deleteRow(sheets, sheetName, rowIndex1Based) {
 function calcHours(start, end) {
   const [sh, sm] = start.split(":").map(Number);
   const [eh, em] = end.split(":").map(Number);
-  const mins = eh * 60 + em - sh * 60 - sm;
+  let mins = eh * 60 + em - sh * 60 - sm;
+  // ★ v1.4: ข้ามวัน (เช่น 22:00–04:00) → +24 ชม.
+  if (mins < 0) mins += 24 * 60;
   return mins > 0 ? +(mins / 60).toFixed(2) : 0;
 }
 
-// ★ v1.3: เช็คว่า OT ช่วงเวลานี้ทับเวลางานปกติ (08:30–17:30) หรือเปล่า
+// ★ v1.3+v1.4: เช็คว่า OT ช่วงเวลานี้ทับเวลางานปกติ (08:30–17:30) — รองรับข้ามวัน
 function overlapsWorkHours(startTime, endTime) {
   const [sh, sm] = startTime.split(":").map(Number);
   const [eh, em] = endTime.split(":").map(Number);
-  const s = sh * 60 + sm;
-  const e = eh * 60 + em;
-  // ช่วง [s,e] ทับช่วง [WORK_START,WORK_END] ก็ต่อเมื่อ s < WORK_END AND e > WORK_START
-  return s < WORK_END_MIN && e > WORK_START_MIN;
+  let s = sh * 60 + sm;
+  let e = eh * 60 + em;
+  if (e < s) e += 24 * 60; // ข้ามวัน
+  // ตรวจทับเวลางานทั้งวันแรก และวันถัดไป (กรณี OT ข้ามวัน)
+  const day1 = s < WORK_END_MIN          && e > WORK_START_MIN;
+  const day2 = s < WORK_END_MIN + 1440   && e > WORK_START_MIN + 1440;
+  return day1 || day2;
+}
+
+// ★ v1.5: เช็คว่า OT อยู่ในช่วง OT day (06:00 ถึง 06:00 ถัดไป) หรือเปล่า
+function validateOTWindow(startTime, endTime) {
+  const [sh, sm] = startTime.split(":").map(Number);
+  const [eh, em] = endTime.split(":").map(Number);
+  let s = sh * 60 + sm;
+  let e = eh * 60 + em;
+  if (e < s) e += 24 * 60; // ข้ามวัน
+  if (s < OT_DAY_START_MIN) return "เวลาเริ่ม OT ต้องไม่ก่อน 06:00";
+  if (e > OT_DAY_END_MIN)   return "OT ต้องสิ้นสุดไม่เกิน 06:00 ของวันถัดไป";
+  return null;
 }
 
 function getTodayThai() {
@@ -595,6 +620,10 @@ async function handleBotEvent(event) {
     const hours    = calcHours(startTime, endTime);
     const already  = await getDayHours(sheets, empData.name, todayDate);
     if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
+
+    // ★ v1.5: OT ต้องอยู่ในช่วง 06:00 ถึง 06:00 ของวันถัดไป
+    const otWindowErr = validateOTWindow(startTime, endTime);
+    if (otWindowErr) return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ${otWindowErr}` });
 
     // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ
     if (overlapsWorkHours(startTime, endTime)) {
