@@ -292,18 +292,16 @@ app.post("/api/ot", async (req, res) => {
     }
 
     const hours = calcHours(startTime, endTime);
-    if (hours <= 0)            return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
-    if (hours > MAX_OT_PER_DAY) return res.status(400).json({ error: `OT สูงสุด ${MAX_OT_PER_DAY} ชม./วัน` });
+    if (hours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
 
-    const alreadyDay = await getDayHours(sheets, name, date);
-    if (alreadyDay + hours > MAX_OT_PER_DAY) {
-      const remain = +(MAX_OT_PER_DAY - alreadyDay).toFixed(1);
-      return res.status(400).json({ error: `วันนี้บันทึกไปแล้ว ${alreadyDay} ชม. เพิ่มได้อีก ${remain} ชม.` });
-    }
+    // ★ v1.2: บันทึกเวลาตามจริง แต่คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
+    const alreadyDay        = await getDayHours(sheets, name, date);
+    const remainingPayable  = Math.max(0, MAX_OT_PER_DAY - alreadyDay);
+    const payableHours      = Math.min(hours, remainingPayable);
+    const pay = Math.round(payableHours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
 
-    const pay = Math.round(hours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
     await saveRecord(sheets, { name, date, startTime, endTime, hours, task, location, otType: "วันธรรมดา", pay });
-    return res.json({ ok: true, hours, pay, otType: "วันธรรมดา" });
+    return res.json({ ok: true, hours, payableHours, pay, otType: "วันธรรมดา", capped: payableHours < hours });
 
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -577,15 +575,21 @@ async function handleBotEvent(event) {
     const [startTime, endTime] = [times[0][0], times[1][0]];
     const hours    = calcHours(startTime, endTime);
     const already  = await getDayHours(sheets, empData.name, todayDate);
-    if (hours <= 0)                       return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
-    if (hours > MAX_OT_PER_DAY)           return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ เกิน ${MAX_OT_PER_DAY} ชม./วัน` });
-    if (already + hours > MAX_OT_PER_DAY) return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ วันนี้บันทึกไปแล้ว ${already} ชม.` });
+    if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
+
+    // ★ v1.2: ลงเวลาตามจริง คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
+    const remainingPayable = Math.max(0, MAX_OT_PER_DAY - already);
+    const payableHours     = Math.min(hours, remainingPayable);
 
     const after = text.replace(/#OT/i,"").replace(startTime,"").replace(endTime,"").trim();
     const [task="", location=""] = after.includes("|") ? after.split("|").map(s=>s.trim()) : [after, ""];
-    const pay   = Math.round(hours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
+    const pay   = Math.round(payableHours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
     await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
-    return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${task||"-"}\n📅 ${todayDate}` });
+
+    const replyText = payableHours < hours
+      ? `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime}\n📊 ทำจริง ${hours}ชม. · คิดเงิน ${payableHours}ชม. (${pay}฿)\n📝 ${task||"-"}\n📅 ${todayDate}`
+      : `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม. · ${pay}฿)\n📝 ${task||"-"}\n📅 ${todayDate}`;
+    return client.replyMessage(event.replyToken, { type:"text", text: replyText });
 
   } catch (err) {
     console.error(err);
