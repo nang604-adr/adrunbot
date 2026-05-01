@@ -115,6 +115,9 @@ textarea{resize:none;height:70px}
 /* ── Error box ── */
 .err-box{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.3);border-radius:8px;padding:8px 12px;font-size:12px;color:#ef9a9a;margin-bottom:10px;display:none}
 
+/* ── Info box ── */
+.info-box{background:rgba(92,107,192,.1);border:1px solid rgba(92,107,192,.3);border-radius:8px;padding:8px 12px;font-size:12px;color:#9fa8da;margin-bottom:10px}
+
 /* ── OT Records list ── */
 .ot-row{padding:12px 14px;border-bottom:1px solid var(--border)}
 .ot-row:last-child{border-bottom:none}
@@ -150,6 +153,7 @@ textarea{resize:none;height:70px}
 /* ── Settings form ── */
 .emp-row{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
 .emp-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0}
+.bound-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-right:4px}
 
 /* ── Modal ── */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:flex-end;justify-content:center}
@@ -348,6 +352,7 @@ const MONTHS_SHORT= ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.
 const DAYS_TH     = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 const DAYS_FULL   = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
 const EMP_COLORS  = ["#00d400","#5c6bc0","#ef6c00","#c2185b","#00bcd4","#ffd54f","#ab47bc","#26a69a"];
+const WEEKDAY_MULT = 1.5;
 
 // ══════════════════════════════════════════════════════════════
 // INIT
@@ -388,6 +393,15 @@ async function init() {
       document.getElementById("adminBadge").style.display = "inline";
       document.getElementById("tab-admin").style.display  = "block";
       document.getElementById("tab-settings").style.display = "block";
+    }
+
+    // ★ แจ้งถ้าหาชื่อไม่เจอใน Sheet
+    if (!me.found) {
+      const errBox = document.getElementById("recordErr");
+      errBox.innerHTML = `⚠️ ไม่พบชื่อ "<b>${profile.displayName}</b>" ในระบบ<br>กรุณาแจ้ง Admin เพิ่มชื่อใน Google Sheet`;
+      errBox.style.display = "block";
+    } else if (me.matchedBy === "displayName+autoBind") {
+      toast("🔗 ผูก LINE ID กับชื่อพนักงานแล้ว", "ok");
     }
 
     // Set today
@@ -553,6 +567,7 @@ async function submitOT() {
   const errBox = document.getElementById("recordErr");
   errBox.style.display = "none";
 
+  if (!STATE.empData) return showErr(errBox, `ไม่พบชื่อ "${STATE.displayName}" ในระบบ — กรุณาแจ้ง Admin`);
   if (!STATE.selDate)  return showErr(errBox, "กรุณาเลือกวันที่");
   const task = document.getElementById("taskInput").value.trim();
   if (!task)           return showErr(errBox, "กรุณาระบุงานที่ทำ");
@@ -572,7 +587,7 @@ async function submitOT() {
     const res  = await fetch("/api/ot", {
       method: "POST", headers: {"Content-Type":"application/json"},
       body: JSON.stringify({
-        name: STATE.displayName, date: STATE.selDate,
+        name: STATE.empData.name, date: STATE.selDate,
         startTime, endTime, task, location: loc,
         otType: isHol ? "holiday" : "weekday",
       }),
@@ -598,13 +613,18 @@ function showErr(el, msg) { el.textContent="⚠️ "+msg; el.style.display="bloc
 // MY OT
 // ══════════════════════════════════════════════════════════════
 async function loadMyOT() {
+  if (!STATE.empData) {
+    document.getElementById("myRecordsList").innerHTML =
+      `<div style="padding:24px;text-align:center;color:#ef9a9a;font-size:13px">ไม่พบชื่อในระบบ — กรุณาแจ้ง Admin</div>`;
+    return;
+  }
   if (!STATE.myMonth) {
     const d  = new Date();
     STATE.myMonth = String(d.getMonth()+1).padStart(2,"0");
     STATE.myYear  = String(d.getFullYear()+543);
   }
 
-  const res  = await fetch(`/api/records?name=${encodeURIComponent(STATE.displayName)}&month=${STATE.myMonth}&year=${STATE.myYear}`);
+  const res  = await fetch(`/api/records?name=${encodeURIComponent(STATE.empData.name)}&month=${STATE.myMonth}&year=${STATE.myYear}`);
   const data = await res.json();
   renderMyOT(data.records || []);
   renderMyMonthRow(data.records || []);
@@ -644,24 +664,26 @@ function renderMyOT(records) {
   }
 
   const html = records.slice().reverse().map(r => {
-    const [dd,mm] = r.date.split("/");
+    const [dd,mm,yy] = r.date.split("/");
+    const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
     const isWday = r.otType === "วันธรรมดา";
-    const pendingReq = false; // will be checked separately if needed
+    const desc = isWday ? `${r.startTime}–${r.endTime} ${r.task}` : `${r.otType} ${r.task}`;
     return `
     <div class="ot-row">
       <div style="display:flex;align-items:flex-start;gap:10px">
         <div class="ot-date-box">
-          <div class="ot-date-day">${r.date.split("/")[0]?DAYS_TH[new Date(Number(r.date.split("/")[2])-543,Number(mm)-1,Number(dd)).getDay()]||"":""}</div>
+          <div class="ot-date-day">${dayShort}</div>
           <div class="ot-date-dd">${dd}</div>
           <div class="ot-date-mm">/${mm}</div>
         </div>
-        <div style="flex:1">
+        <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;flex-wrap:wrap">
             <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:r.otType}</span>
+            ${r.pay?`<span class="badge badge-ok">${Number(r.pay).toLocaleString()} ฿</span>`:""}
           </div>
-          ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
+          ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
         </div>
-        <button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${r.startTime}–${r.endTime} ${r.task}')">🔧</button>
+        <button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${desc.replace(/'/g,"\\'")}')">🔧</button>
       </div>
     </div>`;
   }).join("");
@@ -674,7 +696,7 @@ function openEditRequest(idx, date, desc) {
     <div><label>แจ้งรายละเอียดที่ต้องการแก้ไข</label>
     <textarea id="editNote" placeholder="เช่น เวลาสิ้นสุดผิด ควรเป็น 21:30..."></textarea></div>
     <div style="height:10px"></div>
-    <button class="btn btn-green" onclick="submitEditRequest(${idx},'${date}','${desc}')">📩 ส่งคำขอ</button>
+    <button class="btn btn-green" onclick="submitEditRequest(${idx},'${date}','${desc.replace(/'/g,"\\'")}')">📩 ส่งคำขอ</button>
     <div style="height:8px"></div>
     <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
   `);
@@ -685,7 +707,7 @@ async function submitEditRequest(idx, date, desc) {
   if (!note) return toast("กรุณาระบุรายละเอียด", "err");
   await fetch("/api/edit-request", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ name:STATE.displayName, date, recordDesc:desc, note }),
+    body: JSON.stringify({ name:STATE.empData.name, date, recordDesc:desc, note }),
   });
   closeModal();
   toast("✅ ส่งคำขอถึง Admin แล้ว","ok");
@@ -731,6 +753,7 @@ function showAdminSub(sub) {
 function renderAdminOverview() {
   const totalH   = adminRecords.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
   const totalPay = adminRecords.reduce((s,r)=>s+r.pay,0);
+  const pendingReqs = adminRequests.filter(r=>r.status==="รอดำเนินการ").length;
   const byEmp    = adminEmployees.map(e=>{
     const recs  = adminRecords.filter(r=>r.name===e.name);
     const h     = recs.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
@@ -742,10 +765,12 @@ function renderAdminOverview() {
     <div class="kpi-grid">
       <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">OT วันธรรมดา</div><div class="kpi-val" style="color:#9fa8da">${totalH}</div><div class="kpi-label">ชม.</div></div>
       <div class="kpi" style="border-color:#00b900"><div class="kpi-label">ค่า OT รวม</div><div class="kpi-val" style="color:#81c784">${totalPay.toLocaleString()}</div><div class="kpi-label">บาท</div></div>
+      <div class="kpi" style="border-color:#ef6c00"><div class="kpi-label">รายการทั้งหมด</div><div class="kpi-val" style="color:#ffb74d">${adminRecords.length}</div><div class="kpi-label">รายการ</div></div>
+      <div class="kpi" style="border-color:#c2185b"><div class="kpi-label">รอแก้ไข</div><div class="kpi-val" style="color:#f48fb1">${pendingReqs}</div><div class="kpi-label">คำขอ</div></div>
     </div>
     <div class="card">
       <div class="card-header">📊 OT แยกตามพนักงาน</div>
-      ${byEmp.map((e,i)=>`
+      ${byEmp.length ? byEmp.map((e,i)=>`
       <div style="padding:10px 14px;border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;margin-bottom:5px">
           <span style="font-size:13px">${e.name}</span>
@@ -755,7 +780,7 @@ function renderAdminOverview() {
           <div style="height:100%;width:${totalPay>0?Math.min((e.pay/totalPay)*100,100):0}%;background:linear-gradient(90deg,var(--green),var(--green2));border-radius:3px"></div>
         </div>
         <div style="font-size:10px;color:var(--sub);margin-top:3px">${e.h} ชม. · ${e.count} รายการ</div>
-      </div>`).join("")}
+      </div>`).join("") : `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีข้อมูล OT เดือนนี้</div>`}
     </div>
   `;
 }
@@ -829,7 +854,7 @@ async function handleRequest(idx, status) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// SETTINGS
+// SETTINGS — EMPLOYEES
 // ══════════════════════════════════════════════════════════════
 let settingsEmps = [], settingsHols = [];
 
@@ -851,22 +876,47 @@ function showSettingsSub(sub) {
 }
 
 function renderSettingsEmps() {
-  const rows = settingsEmps.map((e,i)=>`
+  const rows = settingsEmps.map((e,i)=>{
+    const bound = e.userId ? `<span class="bound-dot" title="ผูก LINE ID แล้ว"></span>` : "";
+    return `
     <div class="emp-row">
       <div class="emp-avatar" style="background:${EMP_COLORS[e.name.charCodeAt(0)%EMP_COLORS.length]}">${e.name.charAt(0)}</div>
-      <div style="flex:1">
-        <div style="font-size:13px;font-weight:600">${e.name}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600">${bound}${e.name}</div>
         <div style="font-size:10px;color:var(--sub)">${e.hourlyRate}฿/ชม. · หยุดเหมา${e.holidayFlat.toLocaleString()}฿</div>
       </div>
       <button class="btn btn-grey btn-sm" onclick="openEmpEdit(${i})">✏️</button>
       <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteEmp(${i})">🗑️</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 
   document.getElementById("settings-employees").innerHTML = `
+    <div class="info-box" style="display:flex;align-items:center;gap:6px">
+      <span class="bound-dot"></span>= ผูก LINE ID แล้ว · ส่วนใหญ่ผูกอัตโนมัติเมื่อพนักงานเข้าใช้ LIFF ครั้งแรก
+    </div>
     <div style="margin-bottom:10px;text-align:right">
       <button class="btn btn-green btn-sm" onclick="openEmpAdd()">➕ เพิ่มพนักงาน</button>
     </div>
     <div class="card">${rows||'<div style="padding:20px;text-align:center;color:var(--sub)">ยังไม่มีพนักงาน</div>'}</div>`;
+}
+
+function empPreviewHtml() {
+  return `<div id="empPreview" class="info-box" style="margin-top:8px;display:none"></div>`;
+}
+
+function attachEmpPreview() {
+  const update = () => {
+    const n = (document.getElementById("eN")?.value || "").trim();
+    const h = Number(document.getElementById("eH")?.value || 0);
+    const f = Number(document.getElementById("eF")?.value || 0);
+    const p = document.getElementById("empPreview");
+    if (!p || !n || !h) { if (p) p.style.display="none"; return; }
+    const ot3 = Math.round(3 * h * WEEKDAY_MULT);
+    p.innerHTML = `📊 ${n}: OT 3 ชม. = <b>${ot3.toLocaleString()} ฿</b> · วันหยุดเหมา <b>${f.toLocaleString()} ฿</b>`;
+    p.style.display = "block";
+  };
+  ["eN","eH","eF"].forEach(id => document.getElementById(id)?.addEventListener("input", update));
+  update();
 }
 
 function openEmpAdd() {
@@ -878,9 +928,13 @@ function openEmpAdd() {
         <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="500"></div>
       </div>
     </div>
+    ${empPreviewHtml()}
     <div style="height:12px"></div>
     <button class="btn btn-green" onclick="saveEmpAdd()">✅ เพิ่ม</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
   `);
+  attachEmpPreview();
 }
 
 async function saveEmpAdd() {
@@ -888,14 +942,18 @@ async function saveEmpAdd() {
   const h=Number(document.getElementById("eH").value);
   const f=Number(document.getElementById("eF").value);
   if (!n) return toast("กรุณากรอกชื่อ","err");
-  await fetch("/api/employees",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f})});
+  await fetch("/api/employees",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f,userId:""})});
   closeModal(); toast("✅ เพิ่มพนักงานแล้ว","ok");
   await loadSettings();
 }
 
 function openEmpEdit(i) {
   const e = settingsEmps[i];
+  const boundInfo = e.userId
+    ? `<div class="info-box" style="margin-bottom:10px">🔗 ผูกกับ LINE ID: <code style="font-size:11px">${e.userId.slice(0,8)}...</code></div>`
+    : `<div class="info-box" style="margin-bottom:10px;color:#ffb74d">⚠️ ยังไม่ได้ผูก LINE ID — จะผูกอัตโนมัติเมื่อพนักงานเข้า LIFF ครั้งแรก</div>`;
   openModal("✏️ แก้ไขพนักงาน", `
+    ${boundInfo}
     <div style="display:flex;flex-direction:column;gap:10px">
       <div><label>ชื่อ-นามสกุล</label><input id="eN" value="${e.name}"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -903,69 +961,151 @@ function openEmpEdit(i) {
         <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="${e.holidayFlat}"></div>
       </div>
     </div>
+    ${empPreviewHtml()}
     <div style="height:12px"></div>
     <button class="btn btn-green" onclick="saveEmpEdit(${i})">✅ บันทึก</button>
     <div style="height:8px"></div>
     <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
   `);
+  attachEmpPreview();
 }
 
 async function saveEmpEdit(i) {
   const n=document.getElementById("eN").value.trim();
   const h=Number(document.getElementById("eH").value);
   const f=Number(document.getElementById("eF").value);
-  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f})});
+  // ★ ส่ง userId เดิมไปด้วย ป้องกันถูกเขียนทับเป็นค่าว่าง
+  const uid = settingsEmps[i].userId || "";
+  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f,userId:uid})});
   closeModal(); toast("✅ บันทึกแล้ว","ok"); await loadSettings();
 }
 
 async function deleteEmp(i) {
-  if (!confirm(`ลบ "${settingsEmps[i].name}" ออกใช่ไหม?`)) return;
-  // mark name blank to effectively remove (or implement delete endpoint)
-  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"_DELETED_",hourlyRate:0,holidayFlat:0})});
+  if (!confirm(`ลบ "${settingsEmps[i].name}" ออกใช่ไหม?\n(ประวัติ OT เดิมจะยังคงอยู่)`)) return;
+  // ★ ใช้ DELETE endpoint จริง (backend v1.1)
+  await fetch(`/api/employees/${i}`,{method:"DELETE"});
   toast("🗑️ ลบแล้ว","ok"); await loadSettings();
 }
 
+// ══════════════════════════════════════════════════════════════
+// SETTINGS — HOLIDAYS  ★ ENHANCED
+// ══════════════════════════════════════════════════════════════
 function renderSettingsHols() {
   const byYear = {};
-  settingsHols.forEach(h=>{ const y=h.date.split("/")[2]||"2568"; (byYear[y]=byYear[y]||[]).push(h); });
+  settingsHols.forEach((h,origIdx)=>{
+    const y = h.date.split("/")[2] || "2568";
+    (byYear[y]=byYear[y]||[]).push({...h, origIdx});
+  });
   const years = Object.keys(byYear).sort().reverse();
   const html = years.map(y=>`
     <div class="card" style="margin-bottom:10px">
       <div class="card-header">📅 พ.ศ. ${y} (${byYear[y].length} วัน)</div>
-      ${byYear[y].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>`
-      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
-        <div style="flex:1">
-          <div style="font-size:13px;font-weight:600">${h.name}</div>
-          <div style="font-size:11px;color:var(--sub)">${h.date}</div>
-        </div>
-      </div>`).join("")}
+      ${byYear[y].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>{
+        const [dd,mm,yy] = h.date.split("/");
+        const dow = new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay();
+        return `
+        <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+          <div class="ot-date-box" style="border:1px solid rgba(255,213,79,.2)">
+            <div class="ot-date-day">${DAYS_TH[dow]}</div>
+            <div class="ot-date-dd" style="color:var(--yellow)">${dd}</div>
+            <div class="ot-date-mm">${MONTHS_SHORT[Number(mm)-1]}</div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:600">${h.name}</div>
+            <div style="font-size:11px;color:var(--sub)">${h.date}</div>
+          </div>
+          <button class="btn btn-grey btn-sm" onclick="openHolEdit(${h.origIdx})">✏️</button>
+          <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteHol(${h.origIdx})">🗑️</button>
+        </div>`;
+      }).join("")}
     </div>`).join("");
 
   document.getElementById("settings-holidays").innerHTML = `
+    <div class="info-box">💡 วันหยุดที่ตั้งค่าไว้จะคิด <b>เหมาจ่าย</b> อัตโนมัติเมื่อพนักงานเลือกวันตรงกัน</div>
     <div style="margin-bottom:10px;text-align:right">
       <button class="btn btn-green btn-sm" onclick="openHolAdd()">➕ เพิ่มวันหยุด</button>
     </div>
     ${html||'<div style="text-align:center;color:var(--sub);padding:30px">ยังไม่มีวันหยุด</div>'}`;
 }
 
+function holFormHtml(prefill = {}) {
+  const d = prefill.date || "";
+  const n = prefill.name || "";
+  return `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div>
+        <label>วันที่ (dd/mm/yyyy พ.ศ.)</label>
+        <input id="hD" placeholder="01/01/2569" value="${d}" maxlength="10" oninput="formatThaiDate(this)">
+        <div style="font-size:10px;color:var(--sub);margin-top:3px">รูปแบบ: 01/01/2569 (พ.ศ.)</div>
+      </div>
+      <div>
+        <label>ชื่อวันหยุด</label>
+        <input id="hN" placeholder="เช่น วันขึ้นปีใหม่" value="${n}">
+      </div>
+    </div>`;
+}
+
+// ★ Auto-format: ใส่ / ระหว่างพิมพ์
+function formatThaiDate(input) {
+  let v = input.value.replace(/[^\d]/g,"");
+  if (v.length > 8) v = v.slice(0,8);
+  if (v.length > 4) v = v.slice(0,2) + "/" + v.slice(2,4) + "/" + v.slice(4);
+  else if (v.length > 2) v = v.slice(0,2) + "/" + v.slice(2);
+  input.value = v;
+}
+
+function validateHolForm() {
+  const d = document.getElementById("hD").value.trim();
+  const n = document.getElementById("hN").value.trim();
+  if (!d || !n) { toast("กรุณากรอกข้อมูลให้ครบ","err"); return null; }
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(d)) { toast("รูปแบบวันที่ผิด ใช้ dd/mm/yyyy","err"); return null; }
+  return { date: d, name: n };
+}
+
 function openHolAdd() {
   openModal("🎌 เพิ่มวันหยุดใหม่", `
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <div><label>วันที่ (dd/mm/yyyy พ.ศ.)</label><input id="hD" placeholder="เช่น 01/01/2569"></div>
-      <div><label>ชื่อวันหยุด</label><input id="hN" placeholder="เช่น วันขึ้นปีใหม่"></div>
-    </div>
+    ${holFormHtml()}
     <div style="height:12px"></div>
     <button class="btn btn-green" onclick="saveHolAdd()">✅ เพิ่ม</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
   `);
 }
 
 async function saveHolAdd() {
-  const d=document.getElementById("hD").value.trim();
-  const n=document.getElementById("hN").value.trim();
-  if (!d||!n) return toast("กรุณากรอกข้อมูลให้ครบ","err");
-  await fetch("/api/holidays",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({date:d,name:n})});
+  const v = validateHolForm(); if (!v) return;
+  await fetch("/api/holidays",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(v)});
   closeModal(); toast("✅ เพิ่มวันหยุดแล้ว","ok"); await loadSettings();
-  STATE.holidays = settingsHols; // refresh local
+  STATE.holidays = settingsHols;
+}
+
+// ★ NEW: openHolEdit
+function openHolEdit(i) {
+  const h = settingsHols[i];
+  openModal("✏️ แก้ไขวันหยุด", `
+    ${holFormHtml(h)}
+    <div style="height:12px"></div>
+    <button class="btn btn-green" onclick="saveHolEdit(${i})">✅ บันทึก</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
+  `);
+}
+
+// ★ NEW: saveHolEdit
+async function saveHolEdit(i) {
+  const v = validateHolForm(); if (!v) return;
+  await fetch(`/api/holidays/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(v)});
+  closeModal(); toast("✅ บันทึกแล้ว","ok"); await loadSettings();
+  STATE.holidays = settingsHols;
+}
+
+// ★ NEW: deleteHol
+async function deleteHol(i) {
+  const h = settingsHols[i];
+  if (!confirm(`ลบวันหยุด "${h.name}" (${h.date}) ใช่ไหม?`)) return;
+  await fetch(`/api/holidays/${i}`,{method:"DELETE"});
+  toast("🗑️ ลบแล้ว","ok"); await loadSettings();
+  STATE.holidays = settingsHols;
 }
 
 // ══════════════════════════════════════════════════════════════
