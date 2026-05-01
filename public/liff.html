@@ -403,6 +403,10 @@ let STATE = {
   adminSub: "overview", settingsSub: "employees",
   holidayYear: "",
   adminEmpView: "",
+  chartMode: "daily",
+  chartEmpFilter: "",
+  chartSort: "days",
+  chartCompare: [],
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -1122,38 +1126,252 @@ function renderAdminEmpList(name, records) {
   document.getElementById("adminEmpList").innerHTML = html;
 }
 
+// ★ v1.12: Admin Chart with 3 modes (daily / ranking / compare) + sorting
+function setChartMode(m)    { STATE.chartMode = m; renderAdminChart(); }
+function setChartFilter(n)  { STATE.chartEmpFilter = n; renderAdminChart(); }
+function setChartSort(s)    { STATE.chartSort = s; renderAdminChart(); }
+function toggleChartCompare(n) {
+  STATE.chartCompare = STATE.chartCompare || [];
+  const i = STATE.chartCompare.indexOf(n);
+  if (i >= 0) STATE.chartCompare.splice(i, 1);
+  else if (STATE.chartCompare.length < 4) STATE.chartCompare.push(n);
+  renderAdminChart();
+}
+
 function renderAdminChart() {
-  const dates = [...new Set(adminRecords.map(r=>r.date))].sort((a,b)=>{
+  const mode = STATE.chartMode || "daily";
+
+  // Mode toggle bar
+  const modes = [
+    { id: "daily",   label: "📊 รายวัน" },
+    { id: "ranking", label: "🏆 อันดับ" },
+    { id: "compare", label: "⚖️ เปรียบเทียบ" },
+  ];
+  const modeToggle = `
+    <div style="display:flex;background:#141829;border-radius:10px;padding:3px;margin-bottom:14px;border:1px solid var(--border)">
+      ${modes.map(m => {
+        const active = m.id === mode;
+        return `<button onclick="setChartMode('${m.id}')" style="flex:1;padding:8px 6px;border:0;border-radius:8px;background:${active?'linear-gradient(135deg,var(--green),var(--green2))':'transparent'};color:${active?'#fff':'var(--sub)'};font-size:11px;font-weight:600;font-family:'Noto Sans Thai',sans-serif;cursor:pointer">${m.label}</button>`;
+      }).join("")}
+    </div>
+  `;
+
+  let body = "";
+  if (mode === "daily")   body = renderChartDaily();
+  if (mode === "ranking") body = renderChartRanking();
+  if (mode === "compare") body = renderChartCompare();
+
+  document.getElementById("admin-chart").innerHTML = modeToggle + body;
+}
+
+// ── Mode 1: Daily ──────────────────────────────────────────
+function renderChartDaily() {
+  const sel = STATE.chartEmpFilter || "";
+  const recs = sel ? adminRecords.filter(r => r.name === sel) : adminRecords;
+
+  const chips = `
+    <div class="month-row" style="margin-bottom:12px">
+      <button class="month-chip ${!sel?'active':''}" onclick="setChartFilter('')">👥 ทั้งหมด</button>
+      ${adminEmployees.map(e => {
+        const escName = e.name.replace(/'/g,"\\'");
+        return `<button class="month-chip ${sel===e.name?'active':''}" onclick="setChartFilter('${escName}')">${e.name}</button>`;
+      }).join("")}
+    </div>
+  `;
+
+  const dates = [...new Set(recs.map(r => r.date))].sort((a,b) => {
     const [da,ma,ya]=a.split("/"); const [db,mb,yb]=b.split("/");
-    return new Date(+ya-543,+ma-1,+da)-new Date(+yb-543,+mb-1,+db);
+    return new Date(+ya-543,+ma-1,+da) - new Date(+yb-543,+mb-1,+db);
   });
-  const maxH = Math.max(5, ...dates.map(d=>adminRecords.filter(r=>r.date===d&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0)));
+  const maxH = Math.max(5, ...dates.map(d => recs.filter(r=>r.date===d&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0)));
   const CH = 120;
 
-  const bars = dates.map(date=>{
-    const [dd,mm,yy]=date.split("/");
+  const bars = dates.map(date => {
+    const [dd,mm,yy] = date.split("/");
     const dow = new Date(+yy-543,+mm-1,+dd).getDay();
-    const h   = adminRecords.filter(r=>r.date===date&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
-    const hol = adminRecords.filter(r=>r.date===date&&r.otType!=="วันธรรมดา").length;
-    const bH  = Math.max(h>0?4:0,(h/maxH)*CH);
-    const holH= hol>0?12:0;
-    const col = dow===0?"#ef9a9a":dow===6?"#90caf9":"var(--sub)";
+    const h   = recs.filter(r=>r.date===date&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+    const hol = recs.filter(r=>r.date===date&&r.otType!=="วันธรรมดา").length;
+    const bH  = Math.max(h>0?4:0, (h/maxH)*CH);
+    const holH = hol>0 ? 16 : 0;
+    const col = dow===0 ? "#ef9a9a" : dow===6 ? "#90caf9" : "var(--sub)";
     return `
-    <div class="bar-col">
-      <div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:${CH}px">
-        ${holH?`<div class="bar" style="height:${holH}px;background:#ffd54f;opacity:.8"></div>`:""}
-        <div class="bar" style="height:${bH}px;background:var(--green);opacity:.85" title="${date}: ${h}ชม."></div>
-      </div>
-      <div class="bar-lbl" style="color:${col}">${DAYS_TH[dow]}<br>${dd}/${mm}</div>
-    </div>`;
+      <div class="bar-col">
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:${CH+16}px">
+          ${h>0?`<div style="font-size:9px;color:#81c784;margin-bottom:2px">${+h.toFixed(1)}h</div>`:""}
+          ${holH?`<div class="bar" style="height:${holH}px;background:#ffd54f;opacity:.85"></div>`:""}
+          <div class="bar" style="height:${bH}px;background:var(--green);opacity:.9" title="${date}: ${h}ชม."></div>
+        </div>
+        <div class="bar-lbl" style="color:${col}">${DAYS_TH[dow]}<br>${dd}/${mm}</div>
+      </div>`;
   }).join("");
 
-  document.getElementById("admin-chart").innerHTML = `
+  return `
+    ${chips}
     <div class="card">
-      <div class="card-header">📈 OT รายวัน (เดือนนี้)</div>
+      <div class="card-header">📈 OT รายวัน — ${sel || "ทั้งหมด"} (เดือนนี้)</div>
       <div class="card-body">
-        ${dates.length?`<div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`
-          :`<div style="text-align:center;color:var(--sub);font-size:13px;padding:20px">ไม่มีข้อมูล</div>`}
+        ${dates.length
+          ? `<div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`
+          : `<div style="text-align:center;color:var(--sub);font-size:13px;padding:20px">ไม่มีข้อมูล</div>`}
+      </div>
+    </div>`;
+}
+
+// ── Mode 2: Ranking ────────────────────────────────────────
+function renderChartRanking() {
+  const sort = STATE.chartSort || "days";
+
+  const stats = adminEmployees.map(e => {
+    const r2 = adminRecords.filter(r => r.name === e.name);
+    const days = new Set(r2.map(r => r.date)).size;
+    const hours = r2.filter(r => r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours, 0);
+    const holidays = r2.filter(r => r.otType !== "วันธรรมดา").length;
+    return { name: e.name, days, hours: +hours.toFixed(1), holidays, count: r2.length };
+  }).filter(e => e.count > 0);
+
+  // Sort
+  if (sort === "days")     stats.sort((a,b) => b.days - a.days);
+  if (sort === "hours")    stats.sort((a,b) => b.hours - a.hours);
+  if (sort === "holidays") stats.sort((a,b) => b.holidays - a.holidays);
+
+  const sortOptions = [
+    { id: "days",     label: "📅 จำนวนวัน OT" },
+    { id: "hours",    label: "⏰ ชั่วโมงรวม" },
+    { id: "holidays", label: "🌅 วันหยุด" },
+  ];
+  const sortBar = `
+    <div style="font-size:10px;color:var(--sub);margin-bottom:6px">เรียงตาม:</div>
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+      ${sortOptions.map(o => {
+        const active = o.id === sort;
+        return `<button onclick="setChartSort('${o.id}')" style="padding:5px 12px;border-radius:20px;border:0;background:${active?'linear-gradient(135deg,var(--green),var(--green2))':'#2a2f48'};color:${active?'#fff':'var(--sub)'};font-size:11px;font-weight:700;cursor:pointer;font-family:'Noto Sans Thai',sans-serif">${o.label}</button>`;
+      }).join("")}
+    </div>
+  `;
+
+  if (!stats.length) {
+    return sortBar + `<div class="card"><div style="padding:30px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีข้อมูล OT เดือนนี้</div></div>`;
+  }
+
+  const sortKey = sort === "days" ? "days" : sort === "hours" ? "hours" : "holidays";
+  const maxVal  = Math.max(1, ...stats.map(s => s[sortKey]));
+
+  const d = new Date();
+  const monthLabel = MONTHS_SHORT[d.getMonth()];
+  const yearLabel  = d.getFullYear() + 543;
+  const sortLabel  = sortOptions.find(o => o.id === sort).label;
+
+  const ranks = stats.map((e, i) => {
+    const val = e[sortKey];
+    const sub = `${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays} ครั้ง`;
+    const pct = (val / maxVal) * 100;
+    const empColor = EMP_COLORS[e.name.charCodeAt(0) % EMP_COLORS.length];
+
+    let medal = "", bg = "", barColor = "", numColor = "#90a4ae", iconSize = "13px";
+    if (i === 0)       { medal = "🥇"; bg = "rgba(255,213,79,.06)";  barColor = "linear-gradient(90deg,#ffd54f,#ffb74d)"; numColor = "#ffd54f"; iconSize = "22px"; }
+    else if (i === 1)  { medal = "🥈"; bg = "rgba(176,190,197,.04)"; barColor = "linear-gradient(90deg,#90a4ae,#b0bec5)"; numColor = "#b0bec5"; iconSize = "22px"; }
+    else if (i === 2)  { medal = "🥉"; bg = "rgba(216,90,48,.04)";   barColor = "linear-gradient(90deg,#cd7f32,#d4915a)"; numColor = "#ef9a9a"; iconSize = "22px"; }
+    else               { medal = `${i+1}`;                            barColor = empColor; }
+
+    return `
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border);background:${bg}">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="width:24px;text-align:center;font-size:${iconSize};font-weight:600;color:${i<3?'inherit':'#78909c'}">${medal}</div>
+          <div style="width:34px;height:34px;border-radius:50%;background:${empColor};display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0">${e.name.charAt(0)}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:700">${e.name}</div>
+            <div style="font-size:10px;color:var(--sub)">${sub}</div>
+          </div>
+          <div style="font-size:${i<3?'18px':'16px'};font-weight:800;color:${numColor}">${val}</div>
+        </div>
+        <div style="height:${i<3?'6px':'5px'};background:rgba(255,255,255,.05);border-radius:3px">
+          <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width .3s"></div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    ${sortBar}
+    <div class="card">
+      <div class="card-header">🏆 อันดับ ${monthLabel} ${yearLabel} — ${sortLabel}</div>
+      ${ranks}
+    </div>
+  `;
+}
+
+// ── Mode 3: Compare ────────────────────────────────────────
+function renderChartCompare() {
+  const compare = STATE.chartCompare || [];
+
+  const chips = `
+    <div style="font-size:10px;color:var(--sub);margin-bottom:6px">เลือกได้สูงสุด 4 คน:</div>
+    <div class="month-row" style="margin-bottom:14px">
+      ${adminEmployees.map(e => {
+        const escName = e.name.replace(/'/g,"\\'");
+        const active = compare.includes(e.name);
+        const empColor = EMP_COLORS[e.name.charCodeAt(0) % EMP_COLORS.length];
+        return `<button onclick="toggleChartCompare('${escName}')" style="padding:5px 12px;border-radius:20px;border:1.5px solid ${active?empColor:'rgba(255,255,255,.1)'};background:${active?empColor+'33':'#2a2f48'};color:${active?empColor:'var(--sub)'};font-size:11px;font-weight:700;cursor:pointer;font-family:'Noto Sans Thai',sans-serif">${active?'✓ ':''}${e.name}</button>`;
+      }).join("")}
+    </div>
+  `;
+
+  if (compare.length < 2) {
+    return chips + `<div class="card"><div style="padding:30px;text-align:center;color:var(--sub);font-size:13px">เลือกอย่างน้อย 2 คน เพื่อเปรียบเทียบ</div></div>`;
+  }
+
+  const dates = [...new Set(adminRecords.filter(r => compare.includes(r.name)).map(r => r.date))].sort((a,b) => {
+    const [da,ma,ya]=a.split("/"); const [db,mb,yb]=b.split("/");
+    return new Date(+ya-543,+ma-1,+da) - new Date(+yb-543,+mb-1,+db);
+  });
+  const maxH = Math.max(5, ...dates.flatMap(d =>
+    compare.map(name =>
+      adminRecords.filter(r => r.date===d && r.name===name && r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours, 0)
+    )
+  ));
+  const CH = 120;
+  const BAR_W = Math.max(8, Math.min(16, Math.floor(48 / compare.length)));
+
+  const bars = dates.map(date => {
+    const [dd,mm,yy] = date.split("/");
+    const dow = new Date(+yy-543, +mm-1, +dd).getDay();
+    const col = dow===0 ? "#ef9a9a" : dow===6 ? "#90caf9" : "var(--sub)";
+    const empBars = compare.map(name => {
+      const empColor = EMP_COLORS[name.charCodeAt(0) % EMP_COLORS.length];
+      const h = adminRecords.filter(r => r.date===date && r.name===name && r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours, 0);
+      const hol = adminRecords.filter(r => r.date===date && r.name===name && r.otType!=="วันธรรมดา").length;
+      const bH = Math.max(h>0?3:0, (h/maxH)*CH);
+      const holH = hol > 0 ? 12 : 0;
+      return `
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:${CH}px">
+          ${holH?`<div style="width:${BAR_W}px;height:${holH}px;background:#ffd54f;opacity:.7;border-radius:2px 2px 0 0"></div>`:""}
+          <div style="width:${BAR_W}px;height:${bH}px;background:${empColor};opacity:.9;border-radius:2px 2px 0 0" title="${name} ${date}: ${h}ชม."></div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div style="display:flex;gap:1px;align-items:flex-end">${empBars}</div>
+        <div class="bar-lbl" style="color:${col};margin-top:5px">${DAYS_TH[dow]}<br>${dd}/${mm}</div>
+      </div>
+    `;
+  }).join("");
+
+  const legend = compare.map(name => {
+    const empColor = EMP_COLORS[name.charCodeAt(0) % EMP_COLORS.length];
+    return `<span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text)"><span style="width:10px;height:10px;border-radius:2px;background:${empColor}"></span>${name}</span>`;
+  }).join("");
+
+  return `
+    ${chips}
+    <div class="card">
+      <div class="card-header">⚖️ เปรียบเทียบ — ${compare.length} คน</div>
+      <div class="card-body">
+        <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">${legend}</div>
+        ${dates.length
+          ? `<div class="chart-wrap"><div class="chart-inner" style="gap:10px">${bars}</div></div>`
+          : `<div style="text-align:center;color:var(--sub);font-size:13px;padding:20px">ไม่มีข้อมูล</div>`}
       </div>
     </div>`;
 }
