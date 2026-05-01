@@ -440,6 +440,8 @@ let STATE = {
   chartCompare: [],
   payrollCutoff: "",
   payCalYear: 0, payCalMonth: 0,
+  payShowAll: false,
+  payYearFilter: "all",
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -1792,33 +1794,73 @@ async function loadPayrollHistory() {
   }
 }
 
-function renderPayrollHistory() {
-  // ★ v1.15.3: ซ่อน undone entries จาก default view
-  const active = payrollHistory.filter(p => p.status !== "undone");
-  const undoneCount = payrollHistory.length - active.length;
+// ★ v1.18: Payroll history with year filter + show all toggle + re-export
+function setPayShowAll(val) { STATE.payShowAll = val; renderPayrollHistory(); }
+function setPayYearFilter(y) { STATE.payYearFilter = y; renderPayrollHistory(); }
 
-  if (!active.length) {
-    const note = undoneCount > 0
-      ? `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีรอบจ่ายที่ active<br><span style="font-size:11px;opacity:.7">(${undoneCount} รอบที่ถูกยกเลิก — ดูใน Payroll_Log Sheet)</span></div>`
-      : `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีประวัติการจ่าย</div>`;
-    document.getElementById("payHistoryList").innerHTML = note;
+function renderPayrollHistory() {
+  const showAll = STATE.payShowAll || false;
+  const yearFilter = STATE.payYearFilter || "all";
+
+  // หา year ที่มีในข้อมูล
+  const years = [...new Set(payrollHistory.map(p => (p.cutoff||"").split("/")[2] || ""))].filter(Boolean).sort().reverse();
+
+  // Filter logic
+  let filtered = payrollHistory;
+  if (!showAll) filtered = filtered.filter(p => p.status !== "undone");
+  if (yearFilter !== "all") filtered = filtered.filter(p => (p.cutoff||"").endsWith("/" + yearFilter));
+
+  const undoneCount = payrollHistory.filter(p => p.status === "undone").length;
+
+  // Year chips (ถ้ามีหลายปี)
+  const yearChips = years.length > 1 ? `
+    <div class="month-row" style="margin:0;padding:8px 12px;border-bottom:1px solid var(--border)">
+      <button class="month-chip ${yearFilter==='all'?'active':''}" onclick="setPayYearFilter('all')">ทั้งหมด</button>
+      ${years.map(y => `<button class="month-chip ${yearFilter===y?'active':''}" onclick="setPayYearFilter('${y}')">พ.ศ. ${y}</button>`).join("")}
+    </div>
+  ` : "";
+
+  // Toggle bar
+  const toggleBar = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;color:var(--sub)">
+      <span>${filtered.length} รายการ${yearFilter!=='all'?` (พ.ศ. ${yearFilter})`:""}</span>
+      <button onclick="setPayShowAll(${!showAll})" style="background:transparent;border:1px solid var(--border);color:var(--sub);font-size:10px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:'Noto Sans Thai',sans-serif">
+        ${showAll ? '👁️‍🗨️ ซ่อน undone' : `🔍 ดูทั้งหมด${undoneCount?` (+${undoneCount})`:""}`}
+      </button>
+    </div>
+  `;
+
+  if (!filtered.length) {
+    const empty = `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีประวัติในกรองนี้</div>`;
+    document.getElementById("payHistoryList").innerHTML = yearChips + toggleBar + empty;
     return;
   }
 
-  const html = active.slice().reverse().map(p => `
-    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)">
-      <div style="font-size:16px">✅</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
-        <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${p.createdBy}</div>
+  const html = filtered.slice().reverse().map(p => {
+    const isUndone = p.status === "undone";
+    const ico = isUndone ? "🔄" : "✅";
+    const dlUrl = `${location.origin}/api/export/payroll/${encodeURIComponent(p.payId)}`;
+    const dlBtn = !isUndone
+      ? `<a href="${dlUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;padding:5px 8px" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${dlUrl}','📥 Payroll ${p.payId}');}" title="ดาวน์โหลด">📥</a>`
+      : "";
+    const undoBtn = !isUndone
+      ? `<button class="btn btn-red btn-sm" style="padding:5px 8px" onclick="undoPayroll('${p.payId}')" title="ยกเลิก">↺</button>`
+      : "";
+    return `
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);${isUndone?'opacity:.6':''}">
+        <div style="font-size:16px">${ico}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
+          <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${p.createdBy}</div>
+          ${isUndone ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิกเมื่อ ${p.undoneAt} โดย ${p.undoneBy||'-'}</div>` : ''}
+        </div>
+        ${dlBtn}
+        ${undoBtn}
       </div>
-      <button class="btn btn-red btn-sm" onclick="undoPayroll('${p.payId}')">↺ Undo</button>
-    </div>
-  `).join("");
-  const footer = undoneCount > 0
-    ? `<div style="padding:8px 12px;font-size:10px;color:var(--sub);text-align:center;font-style:italic;border-top:1px solid var(--border)">+ ${undoneCount} รอบที่ยกเลิกแล้ว (ดูใน Payroll_Log Sheet)</div>`
-    : "";
-  document.getElementById("payHistoryList").innerHTML = html + footer;
+    `;
+  }).join("");
+
+  document.getElementById("payHistoryList").innerHTML = yearChips + toggleBar + html;
 }
 
 async function undoPayroll(payId) {
