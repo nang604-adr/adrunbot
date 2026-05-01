@@ -741,12 +741,21 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       return res.status(404).send(`ไม่พบ records ในรอบ ${payId}`);
     }
 
-    // Get payroll metadata
-    const log = await getPayrollLog(sheets);
-    const meta = log.find(l => l.id === payId);
-    const cutoff = meta?.cutoff || "-";
-    const createdAt = meta?.paidAt || "-";
-    const createdBy = "Admin";
+    // Get payroll metadata (inline fetch — Payroll_Log!A:J)
+    let cutoff = "-", createdAt = "-", createdBy = "Admin";
+    try {
+      const logRes = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: "Payroll_Log!A3:J5000",
+      });
+      const logRows = logRes.data.values || [];
+      const meta = logRows.find(row => row[0] === payId);
+      if (meta) {
+        cutoff = meta[1] || "-";
+        createdAt = meta[2] || "-";
+        createdBy = meta[6] || "Admin";
+      }
+    } catch (_) { /* tab อาจยังไม่มี */ }
 
     const wb = XLSX.utils.book_new();
 
