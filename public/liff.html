@@ -1757,13 +1757,18 @@ async function commitPayroll() {
     const data = await res.json();
     if (!res.ok) return toast(data.error || "บันทึกไม่สำเร็จ", "err");
 
-    // ★ v1.16.1: ถ้า LIFF mobile → server-side download + fallback modal
+    // ★ v1.17: ใช้ server endpoint ทุกกรณี
+    const url = `${location.origin}/api/export/payroll/${encodeURIComponent(data.payId)}`;
     if (isLiffMobile()) {
-      const url = `${location.origin}/api/export/payroll/${encodeURIComponent(data.payId)}`;
       openExternalOrShowLink(url, `📥 ดาวน์โหลด Payroll ${data.payId}`);
       toast(`✅ บันทึก ${data.records} รายการ`, "ok");
     } else {
-      generatePayrollExcel(payrollPreview, data.payId, data.committedAt, adminName);
+      const a = document.createElement("a");
+      a.href = url;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
       toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
     }
     payrollPreview = null;
@@ -2004,83 +2009,26 @@ function generatePayrollExcel(preview, payId, committedAt, adminName) {
   if (downloadXlsx(wb, fname)) toast(`📥 ${fname}`, "ok");
 }
 
-// ── Monthly Export (Option C) ─────────────────────────────
+// ── Monthly Export (Option C) — v1.17 ใช้ server endpoint ทุกกรณี
 function exportMonthlyExcel(employeeFilter) {
-  // ★ v1.16.1: ถ้าอยู่ใน LIFF mobile → ใช้ server-side endpoint + fallback modal
-  if (isLiffMobile()) {
-    const d = new Date();
-    const mm = String(d.getMonth()+1).padStart(2,"0");
-    const yy = String(d.getFullYear()+543);
-    const url = `${location.origin}/api/export/monthly?month=${mm}&year=${yy}` + (employeeFilter ? `&employee=${encodeURIComponent(employeeFilter)}` : "");
-    openExternalOrShowLink(url, "📥 ดาวน์โหลด Monthly Excel");
-    return;
-  }
-
-  // Desktop / external browser → generate ใน client (เร็วกว่า)
   const d = new Date();
-  const monthLabel = MONTHS_SHORT[d.getMonth()];
-  const yearLabel = d.getFullYear()+543;
-  const recs = employeeFilter ? adminRecords.filter(r => r.name === employeeFilter) : adminRecords;
-  if (!recs.length) return toast("ไม่มีข้อมูลให้ export", "err");
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  const yy = String(d.getFullYear()+543);
+  const url = `${location.origin}/api/export/monthly?month=${mm}&year=${yy}`
+              + (employeeFilter ? `&employee=${encodeURIComponent(employeeFilter)}` : "");
 
-  const wb = XLSX.utils.book_new();
-
-  // Summary by employee
-  const byEmp = {};
-  recs.forEach(r => {
-    byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
-    byEmp[r.name].days.add(r.date);
-    byEmp[r.name].count += 1;
-    byEmp[r.name].pay   += r.pay;
-    if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
-    else                          byEmp[r.name].holidays += 1;
-  });
-  const summary = Object.values(byEmp).map(e => ({
-    name: e.name, days: e.days.size, hours: +e.hours.toFixed(2), holidays: e.holidays, pay: e.pay,
-  })).sort((a,b) => b.pay - a.pay);
-
-  const sumRows = [
-    [`สรุป OT — ${monthLabel} ${yearLabel}${employeeFilter?` — ${employeeFilter}`:""}`],
-    [],
-    ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง (วันธรรมดา)","วันหยุด (ครั้ง)","ค่า OT (฿)","สถานะจ่าย"],
-  ];
-  summary.forEach((e, i) => {
-    const empRecs = recs.filter(r => r.name === e.name);
-    const allPaid = empRecs.every(r => r.paidAt);
-    const somePaid = empRecs.some(r => r.paidAt);
-    const status = allPaid ? "✅ จ่ายแล้วครบ" : somePaid ? "⏳ จ่ายบางส่วน" : "⏳ ยังไม่จ่าย";
-    sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay, status]);
-  });
-  sumRows.push([]);
-  sumRows.push(["รวมทั้งหมด","",summary.reduce((s,e)=>s+e.days,0),summary.reduce((s,e)=>s+e.hours,0).toFixed(2),summary.reduce((s,e)=>s+e.holidays,0),summary.reduce((s,e)=>s+e.pay,0),""]);
-
-  const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-  ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:18},{wch:14},{wch:16},{wch:18}];
-  XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
-
-  // Details
-  const detailRows = [
-    ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชม.","งาน","สถานที่","ประเภท","ค่า (฿)","Payroll ID","สถานะ"],
-  ];
-  recs.slice().sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date)).forEach(r => {
-    detailRows.push([
-      r.name, r.date, r.startTime, r.endTime, r.hours,
-      r.task||"", r.location||"", r.otType, r.pay,
-      r.paidAt || "", r.paidAt ? "✅ จ่ายแล้ว" : "⏳ รอจ่าย",
-    ]);
-  });
-  const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
-  ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20},{wch:14}];
-  XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
-
-  // ★ v1.15.3: ASCII filename (กัน Thai char ปัญหา)
-  const d2 = new Date();
-  const mNum = String(d2.getMonth()+1).padStart(2,"0");
-  const yNum = d2.getFullYear()+543;
-  const fileName = employeeFilter
-    ? `OT_${employeeFilter}_${mNum}-${yNum}.xlsx`
-    : `OT_All_${mNum}-${yNum}.xlsx`;
-  if (downloadXlsx(wb, fileName)) toast(`📥 Export ${recs.length} รายการ`, "ok");
+  if (isLiffMobile()) {
+    openExternalOrShowLink(url, "📥 ดาวน์โหลด Monthly Excel");
+  } else {
+    // Desktop: trigger download via temporary anchor
+    const a = document.createElement("a");
+    a.href = url;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast("📥 กำลังดาวน์โหลด...", "ok");
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
