@@ -64,6 +64,10 @@ async function getSheetsClient() {
 const MAX_OT_PER_DAY     = 5;
 const WEEKDAY_MULTIPLIER = 1.5;
 
+// ★ v1.3: เวลางานปกติ จันทร์–เสาร์ (ห้ามลง OT ทับ)
+const WORK_START_MIN = 8 * 60 + 30;   // 08:30 = 510
+const WORK_END_MIN   = 17 * 60 + 30;  // 17:30 = 1050
+
 // ★ data ทุก sheet เริ่มที่ row 3 (มี 2 header rows)
 const DATA_START_ROW = 3;
 
@@ -294,6 +298,11 @@ app.post("/api/ot", async (req, res) => {
     const hours = calcHours(startTime, endTime);
     if (hours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
 
+    // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ จันทร์–เสาร์ 08:30–17:30
+    if (overlapsWorkHours(startTime, endTime)) {
+      return res.status(400).json({ error: "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
+    }
+
     // ★ v1.2: บันทึกเวลาตามจริง แต่คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
     const alreadyDay        = await getDayHours(sheets, name, date);
     const remainingPayable  = Math.max(0, MAX_OT_PER_DAY - alreadyDay);
@@ -484,6 +493,16 @@ function calcHours(start, end) {
   return mins > 0 ? +(mins / 60).toFixed(2) : 0;
 }
 
+// ★ v1.3: เช็คว่า OT ช่วงเวลานี้ทับเวลางานปกติ (08:30–17:30) หรือเปล่า
+function overlapsWorkHours(startTime, endTime) {
+  const [sh, sm] = startTime.split(":").map(Number);
+  const [eh, em] = endTime.split(":").map(Number);
+  const s = sh * 60 + sm;
+  const e = eh * 60 + em;
+  // ช่วง [s,e] ทับช่วง [WORK_START,WORK_END] ก็ต่อเมื่อ s < WORK_END AND e > WORK_START
+  return s < WORK_END_MIN && e > WORK_START_MIN;
+}
+
 function getTodayThai() {
   const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
   return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()+543}`;
@@ -576,6 +595,11 @@ async function handleBotEvent(event) {
     const hours    = calcHours(startTime, endTime);
     const already  = await getDayHours(sheets, empData.name, todayDate);
     if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
+
+    // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ
+    if (overlapsWorkHours(startTime, endTime)) {
+      return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
+    }
 
     // ★ v1.2: ลงเวลาตามจริง คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
     const remainingPayable = Math.max(0, MAX_OT_PER_DAY - already);
