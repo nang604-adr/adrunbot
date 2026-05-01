@@ -163,9 +163,27 @@ textarea{resize:none;height:70px}
 
 /* ── KPI cards ── */
 .kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.kpi-grid-3{grid-template-columns:1fr 1fr 1fr}
 .kpi{background:var(--card);border-radius:12px;padding:12px 14px;border-left:3px solid}
 .kpi-val{font-size:22px;font-weight:800;margin:2px 0}
 .kpi-label{font-size:10px;color:var(--sub)}
+
+/* ── v1.10: My OT Heatmap Calendar ── */
+.heatmap-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.heatmap-hdr{font-size:9px;padding:2px;text-align:center;color:var(--sub)}
+.heatmap-hdr.sun{color:#ef9a9a}.heatmap-hdr.sat{color:#90caf9}
+.heatmap-day{height:38px;background:#141829;border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;gap:1px;color:var(--sub)}
+.heatmap-day.is-sun{color:#ef9a9a}
+.heatmap-day.is-sat{color:#90caf9}
+.heatmap-day.l1{background:rgba(0,185,0,.25);color:#fff;font-weight:600}
+.heatmap-day.l2{background:rgba(0,185,0,.55);color:#fff;font-weight:600}
+.heatmap-day.l3{background:rgba(0,185,0,.85);color:#fff;font-weight:600}
+.heatmap-day.holiday-d{background:rgba(255,213,79,.3);color:#ffd54f;font-weight:600}
+.heatmap-day-num{line-height:1}
+.heatmap-day-h{font-size:8px;opacity:.95;line-height:1}
+.heatmap-legend{display:flex;gap:10px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:9px;color:var(--sub);justify-content:center;flex-wrap:wrap;align-items:center}
+.heatmap-legend-item{display:flex;align-items:center;gap:4px}
+.heatmap-legend-sw{width:10px;height:10px;border-radius:3px}
 
 /* ── Chart ── */
 .chart-wrap{overflow-x:auto;padding-bottom:4px}
@@ -313,16 +331,21 @@ textarea{resize:none;height:70px}
       <button class="btn btn-green" onclick="submitOT()">✅ บันทึก OT</button>
     </div>
 
-    <!-- ══════════════════ MY OT TAB ══════════════════ -->
+    <!-- ══════════════════ MY OT TAB (v1.10) ══════════════════ -->
     <div class="section" id="sec-myot">
       <div class="month-row" id="myMonthRow"></div>
-      <div class="kpi-grid" id="myKpi">
-        <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">วันธรรมดา</div><div class="kpi-val" style="color:#9fa8da" id="kpiH">-</div><div class="kpi-label">ชั่วโมง</div></div>
-        <div class="kpi" style="border-color:#c2185b"><div class="kpi-label">วันหยุด</div><div class="kpi-val" style="color:#f48fb1" id="kpiHol">-</div><div class="kpi-label">วัน</div></div>
+      <div class="kpi-grid kpi-grid-3" id="myKpi">
+        <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">วัน OT</div><div class="kpi-val" style="color:#9fa8da" id="kpiDays">-</div><div class="kpi-label">วัน</div></div>
+        <div class="kpi" style="border-color:#00b900"><div class="kpi-label">ชั่วโมงรวม</div><div class="kpi-val" style="color:#81c784" id="kpiH">-</div><div class="kpi-label">ชม.</div></div>
+        <div class="kpi" style="border-color:#ffd54f"><div class="kpi-label">วันหยุด</div><div class="kpi-val" style="color:#ffd54f" id="kpiHol">-</div><div class="kpi-label">วัน</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header" id="myCalTitle">📅 ปฏิทิน OT</div>
+        <div class="card-body" id="myCalendar"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>
       </div>
       <div class="card" id="myRecordsCard">
-        <div class="card-header">📋 รายการ OT</div>
-        <div id="myRecordsList"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>
+        <div class="card-header">📋 รายการละเอียด</div>
+        <div id="myRecordsList"></div>
       </div>
     </div>
 
@@ -755,11 +778,18 @@ async function changeMyMonth(mm, yy) {
 }
 
 function renderMyOT(records) {
-  const h   = records.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
-  const hol = records.filter(r=>r.otType!=="วันธรรมดา").length;
-  document.getElementById("kpiH").textContent   = h;
-  document.getElementById("kpiHol").textContent = hol;
+  // KPI: วัน OT (unique dates), ชั่วโมงรวม (วันธรรมดา), วันหยุด (count)
+  const uniqueDates = new Set(records.map(r => r.date));
+  const weekdayHrs  = records.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+  const holDays     = records.filter(r=>r.otType!=="วันธรรมดา").length;
+  document.getElementById("kpiDays").textContent = uniqueDates.size;
+  document.getElementById("kpiH").textContent    = +weekdayHrs.toFixed(2);
+  document.getElementById("kpiHol").textContent  = holDays;
 
+  // ★ Heatmap calendar
+  renderMyOTHeatmap(records);
+
+  // ★ Records list (no pay badge)
   if (!records.length) {
     document.getElementById("myRecordsList").innerHTML = `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีรายการ OT เดือนนี้</div>`;
     return;
@@ -770,18 +800,20 @@ function renderMyOT(records) {
     const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
     const isWday = r.otType === "วันธรรมดา";
     const desc = isWday ? `${r.startTime}–${r.endTime} ${r.task}` : `${r.otType} ${r.task}`;
+    const rowBg = isWday ? "" : `background:rgba(255,213,79,.03)`;
+    const dateBoxStyle = isWday ? "" : `border:1px solid rgba(255,213,79,.2)`;
+    const ddColor = isWday ? "" : `color:#ffd54f`;
     return `
-    <div class="ot-row">
+    <div class="ot-row" style="${rowBg}">
       <div style="display:flex;align-items:flex-start;gap:10px">
-        <div class="ot-date-box">
+        <div class="ot-date-box" style="${dateBoxStyle}">
           <div class="ot-date-day">${dayShort}</div>
-          <div class="ot-date-dd">${dd}</div>
+          <div class="ot-date-dd" style="${ddColor}">${dd}</div>
           <div class="ot-date-mm">/${mm}</div>
         </div>
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;flex-wrap:wrap">
-            <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:r.otType}</span>
-            ${r.pay?`<span class="badge badge-ok">${Number(r.pay).toLocaleString()} ฿</span>`:""}
+            <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:'🌅 '+r.otType}</span>
           </div>
           ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
         </div>
@@ -790,6 +822,64 @@ function renderMyOT(records) {
     </div>`;
   }).join("");
   document.getElementById("myRecordsList").innerHTML = html;
+}
+
+// ★ v1.10: Heatmap calendar สำหรับ My OT
+function renderMyOTHeatmap(records) {
+  if (!STATE.myMonth || !STATE.myYear) return;
+  const yearG    = Number(STATE.myYear) - 543;
+  const monthIdx = Number(STATE.myMonth) - 1;
+  const firstDow = new Date(yearG, monthIdx, 1).getDay();
+  const daysIn   = new Date(yearG, monthIdx+1, 0).getDate();
+
+  // group by day
+  const byDay = {};
+  records.forEach(r => {
+    const day = Number(r.date.split("/")[0]);
+    byDay[day] = byDay[day] || { wHrs: 0, hol: false };
+    if (r.otType === "วันธรรมดา") byDay[day].wHrs += r.hours;
+    else                          byDay[day].hol = true;
+  });
+
+  let html = '<div class="heatmap-grid">';
+  ["อา","จ","อ","พ","พฤ","ศ","ส"].forEach((d,i) => {
+    html += `<div class="heatmap-hdr ${i===0?'sun':i===6?'sat':''}">${d}</div>`;
+  });
+  for (let i=0;i<firstDow;i++) html += '<div></div>';
+  for (let d=1;d<=daysIn;d++) {
+    const data = byDay[d];
+    const dow  = new Date(yearG, monthIdx, d).getDay();
+    let cls = "heatmap-day";
+    if (dow === 0) cls += " is-sun";
+    if (dow === 6) cls += " is-sat";
+    let extra = "";
+    if (data) {
+      if (data.hol) {
+        cls += " holiday-d";
+        extra = `<span class="heatmap-day-h">🌅</span>`;
+      } else if (data.wHrs > 0) {
+        const lvl = data.wHrs >= 5 ? 3 : data.wHrs >= 3 ? 2 : 1;
+        cls += ` l${lvl}`;
+        extra = `<span class="heatmap-day-h">${+data.wHrs.toFixed(1)}h</span>`;
+      }
+    }
+    html += `<div class="${cls}"><span class="heatmap-day-num">${d}</span>${extra}</div>`;
+  }
+  html += '</div>';
+
+  // Legend
+  html += `
+    <div class="heatmap-legend">
+      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.25)"></span>1–2 ชม.</span>
+      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.55)"></span>3–4 ชม.</span>
+      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.85)"></span>5 ชม.</span>
+      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(255,213,79,.3)"></span>วันหยุด 🌅</span>
+    </div>
+  `;
+
+  document.getElementById("myCalendar").innerHTML = html;
+  document.getElementById("myCalTitle").textContent =
+    `📅 ปฏิทิน OT — ${MONTHS_SHORT[monthIdx]} ${STATE.myYear}`;
 }
 
 function openEditRequest(idx, date, desc) {
