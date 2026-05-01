@@ -321,6 +321,45 @@ app.post("/api/ot", async (req, res) => {
   }
 });
 
+// ── POST /api/bind-employee — Self-claim ผูกบัญชี LINE ★ v1.13
+app.post("/api/bind-employee", async (req, res) => {
+  const { userId, employeeName } = req.body;
+  if (!userId || !employeeName) return res.status(400).json({ error: "ข้อมูลไม่ครบ" });
+  try {
+    const sheets    = await getSheetsClient();
+    const employees = await getEmployees(sheets);
+
+    // 1) เช็คว่า userId นี้ผูกกับคนอื่นแล้วหรือยัง
+    const existingBind = employees.find(e => e.userId && e.userId === userId);
+    if (existingBind) {
+      return res.status(400).json({ error: `LINE ID นี้ถูกผูกกับ "${existingBind.name}" แล้ว` });
+    }
+
+    // 2) หาเป้าหมาย
+    const target = employees.find(e => e.name === employeeName);
+    if (!target) return res.status(400).json({ error: `ไม่พบพนักงาน "${employeeName}"` });
+
+    // 3) เช็คว่าเป้าหมายยังไม่ผูกกับใคร
+    if (target.userId) {
+      return res.status(400).json({ error: `"${employeeName}" ถูกผูกกับ LINE คนอื่นแล้ว` });
+    }
+
+    // 4) Bind
+    const row = idxToRow(target.idx);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Employees!D${row}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [[userId]] },
+    });
+
+    console.log(`🔗 Self-claim: ${userId} → ${target.name}`);
+    res.json({ ok: true, name: target.name });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── POST /api/edit-request — ขอแก้ไข OT ────────────────────
 app.post("/api/edit-request", async (req, res) => {
   const { name, date, recordDesc, note } = req.body;
