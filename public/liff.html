@@ -375,6 +375,7 @@ let STATE = {
   calYear: 0, calMonth: 0,
   myMonth: "", myYear: "",
   adminSub: "overview", settingsSub: "employees",
+  holidayYear: "",
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -1091,42 +1092,75 @@ async function deleteEmp(i) {
 // ══════════════════════════════════════════════════════════════
 // SETTINGS — HOLIDAYS  ★ ENHANCED
 // ══════════════════════════════════════════════════════════════
+// ★ v1.9: แยกเป็น year tabs
+function selectHolidayYear(y) {
+  STATE.holidayYear = y;
+  renderSettingsHols();
+}
+
 function renderSettingsHols() {
+  const currentThaiYear = String(new Date().getFullYear() + 543);
   const byYear = {};
-  settingsHols.forEach((h,origIdx)=>{
-    const y = h.date.split("/")[2] || "2568";
-    (byYear[y]=byYear[y]||[]).push({...h, origIdx});
+  settingsHols.forEach((h, origIdx) => {
+    const y = h.date.split("/")[2] || currentThaiYear;
+    (byYear[y] = byYear[y] || []).push({ ...h, origIdx });
   });
-  const years = Object.keys(byYear).sort().reverse();
-  const html = years.map(y=>`
-    <div class="card" style="margin-bottom:10px">
-      <div class="card-header">📅 พ.ศ. ${y} (${byYear[y].length} วัน)</div>
-      ${byYear[y].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>{
-        const [dd,mm,yy] = h.date.split("/");
-        const dow = new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay();
+
+  // รวมปีจากข้อมูล + ปีปัจจุบัน + ปีถัดไป (เพื่อเตรียมเพิ่มล่วงหน้า)
+  const yearSet = new Set([
+    ...Object.keys(byYear),
+    currentThaiYear,
+    String(Number(currentThaiYear) + 1),
+  ]);
+  const years = [...yearSet].sort().reverse();
+
+  // default selected year = current
+  if (!STATE.holidayYear || !years.includes(STATE.holidayYear)) {
+    STATE.holidayYear = currentThaiYear;
+  }
+  const selYear = STATE.holidayYear;
+  const yearList = (byYear[selYear] || []).sort((a, b) => a.date.localeCompare(b.date));
+
+  const yearTabs = years.map(y => {
+    const count = (byYear[y] || []).length;
+    const active = y === selYear ? 'active' : '';
+    return `<button class="month-chip ${active}" onclick="selectHolidayYear('${y}')">${y}${count > 0 ? ` <span style="opacity:.7;font-weight:400">(${count})</span>` : ""}</button>`;
+  }).join("");
+
+  const listHtml = yearList.length === 0
+    ? `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">
+         ยังไม่มีวันหยุดในปี พ.ศ. ${selYear}<br>
+         <span style="font-size:11px;opacity:.7">กด ➕ เพิ่มวันหยุด ด้านบนเพื่อเริ่ม</span>
+       </div>`
+    : yearList.map(h => {
+        const [dd, mm, yy] = h.date.split("/");
+        const dow = new Date(Number(yy) - 543, Number(mm) - 1, Number(dd)).getDay();
         return `
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
-          <div class="ot-date-box" style="border:1px solid rgba(255,213,79,.2)">
-            <div class="ot-date-day">${DAYS_TH[dow]}</div>
-            <div class="ot-date-dd" style="color:var(--yellow)">${dd}</div>
-            <div class="ot-date-mm">${MONTHS_SHORT[Number(mm)-1]}</div>
-          </div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13px;font-weight:600">${h.name}</div>
-            <div style="font-size:11px;color:var(--sub)">${h.date}</div>
-          </div>
-          <button class="btn btn-grey btn-sm" onclick="openHolEdit(${h.origIdx})">✏️</button>
-          <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteHol(${h.origIdx})">🗑️</button>
-        </div>`;
-      }).join("")}
-    </div>`).join("");
+          <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+            <div class="ot-date-box" style="border:1px solid rgba(255,213,79,.2)">
+              <div class="ot-date-day">${DAYS_TH[dow]}</div>
+              <div class="ot-date-dd" style="color:var(--yellow)">${dd}</div>
+              <div class="ot-date-mm">${MONTHS_SHORT[Number(mm) - 1]}</div>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600">${h.name}</div>
+              <div style="font-size:11px;color:var(--sub)">${h.date}</div>
+            </div>
+            <button class="btn btn-grey btn-sm" onclick="openHolEdit(${h.origIdx})">✏️</button>
+            <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteHol(${h.origIdx})">🗑️</button>
+          </div>`;
+      }).join("");
 
   document.getElementById("settings-holidays").innerHTML = `
     <div class="info-box">💡 วันหยุดที่ตั้งค่าไว้จะคิด <b>เหมาจ่าย</b> อัตโนมัติเมื่อพนักงานเลือกวันตรงกัน</div>
-    <div style="margin-bottom:10px;text-align:right">
-      <button class="btn btn-green btn-sm" onclick="openHolAdd()">➕ เพิ่มวันหยุด</button>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <div class="month-row" style="flex:1;margin-bottom:0">${yearTabs}</div>
+      <button class="btn btn-green btn-sm" onclick="openHolAdd()" style="flex-shrink:0">➕ เพิ่ม</button>
     </div>
-    ${html||'<div style="text-align:center;color:var(--sub);padding:30px">ยังไม่มีวันหยุด</div>'}`;
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-header">🎌 พ.ศ. ${selYear} (${yearList.length} วัน)</div>
+      ${listHtml}
+    </div>`;
 }
 
 function holFormHtml(prefill = {}) {
