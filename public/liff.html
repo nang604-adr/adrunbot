@@ -66,24 +66,41 @@ textarea{resize:none;height:70px}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
 .cal-hdr{text-align:center;font-size:9px;padding:3px 0;color:var(--sub)}
 .cal-hdr.sun{color:#ef9a9a}.cal-hdr.sat{color:#90caf9}
-.cal-day{height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;font-size:12px;cursor:pointer;transition:all .1s;border:1px solid transparent;position:relative}
+/* ★ v1.8: Calendar with circle highlights for Sunday + Holiday */
+.cal-day{height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative}
 .cal-day:empty,.cal-day.empty{cursor:default}
-.cal-day.future{color:rgba(255,255,255,.15);cursor:not-allowed}
-.cal-day.today:not(.selected){border-color:rgba(0,185,0,.4);color:var(--green)}
-.cal-day.selected{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;font-weight:800}
-.cal-day.sun-day{color:#ef9a9a}.cal-day.sat-day{color:#90caf9}
-/* ★ v1.7: highlight วันหยุดนักขัตฤกษ์ + dot indicator วันเหมาจ่าย */
-.cal-day.holiday-day{background:rgba(255,213,79,.10);color:#ffd54f}
-.cal-day.holiday-day:not(.selected)::after,
-.cal-day.sun-day:not(.selected):not(.future)::after{
-  content:'';position:absolute;width:4px;height:4px;border-radius:50%;
-  bottom:2px;left:50%;transform:translateX(-50%);
+.cal-day.future{cursor:not-allowed}
+.cal-day-num{
+  width:32px;height:32px;display:flex;align-items:center;justify-content:center;
+  border-radius:50%;font-size:13px;font-weight:600;
+  border:1.5px solid transparent;transition:all .15s;
+  color:var(--text);
 }
-.cal-day.holiday-day:not(.selected)::after{background:#ffd54f}
-.cal-day.sun-day:not(.selected):not(.future)::after{background:#ef9a9a}
-.cal-legend{display:flex;gap:12px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:10px;color:var(--sub);justify-content:center;flex-wrap:wrap}
-.cal-legend-item{display:flex;align-items:center;gap:4px}
-.cal-legend-dot{width:6px;height:6px;border-radius:50%}
+.cal-day.future .cal-day-num{opacity:.35}
+.cal-day:not(.future):not(.selected):active .cal-day-num{background:rgba(255,255,255,.05)}
+/* Today */
+.cal-day.today:not(.selected) .cal-day-num{
+  border-color:rgba(0,185,0,.55);color:var(--green);
+}
+/* Selected — green filled */
+.cal-day.selected .cal-day-num{
+  background:linear-gradient(135deg,var(--green),var(--green2));
+  color:#fff;font-weight:800;border-color:var(--green);
+  box-shadow:0 2px 8px rgba(0,185,0,.45);
+}
+/* Saturday — blue text only */
+.cal-day.sat-day:not(.selected):not(.holiday-day) .cal-day-num{color:#90caf9}
+/* Sunday — red circle (เหมาจ่าย) */
+.cal-day.sun-day:not(.selected):not(.holiday-day) .cal-day-num{
+  background:rgba(239,154,154,.12);border-color:rgba(239,154,154,.55);color:#ef9a9a;
+}
+/* Holiday — yellow circle (เหมาจ่าย) */
+.cal-day.holiday-day:not(.selected) .cal-day-num{
+  background:rgba(255,213,79,.15);border-color:rgba(255,213,79,.6);color:#ffd54f;
+}
+.cal-legend{display:flex;gap:14px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11px;color:var(--sub);justify-content:center;flex-wrap:wrap;align-items:center}
+.cal-legend-item{display:flex;align-items:center;gap:5px}
+.cal-legend-circle{width:14px;height:14px;border-radius:50%;border:1.5px solid;display:inline-block}
 
 /* ── Time drum ── */
 .time-picker{background:var(--card);border-radius:14px;padding:12px;border:1px solid var(--border)}
@@ -519,16 +536,17 @@ function renderCal() {
     }
     const click = isFuture ? "" : `onclick="selectDate('${dateStr}',${dow})"`;
     const titleAttr = holiday ? `title="${holiday.name} (เหมาจ่าย)"` : (dow===0 ? `title="วันอาทิตย์ (เหมาจ่าย)"` : "");
-    html += `<div class="${cls}" ${click} ${titleAttr}>${d}</div>`;
+    // ★ v1.8: ตัวเลขห่อใน span เพื่อทำวงกลมรอบ
+    html += `<div class="${cls}" ${click} ${titleAttr}><span class="cal-day-num">${d}</span></div>`;
   }
   grid.innerHTML = html;
 
-  // ★ v1.7: legend อธิบาย dot indicator
+  // ★ v1.8: legend with circle indicators
   const legendEl = document.getElementById("calLegend");
   if (legendEl) {
     legendEl.innerHTML = `
-      <div class="cal-legend-item"><span class="cal-legend-dot" style="background:#ef9a9a"></span>อาทิตย์</div>
-      <div class="cal-legend-item"><span class="cal-legend-dot" style="background:#ffd54f"></span>วันหยุดนักขัตฤกษ์</div>
+      <div class="cal-legend-item"><span class="cal-legend-circle" style="border-color:#ef9a9a;background:rgba(239,154,154,.12)"></span>วันอาทิตย์</div>
+      <div class="cal-legend-item"><span class="cal-legend-circle" style="border-color:#ffd54f;background:rgba(255,213,79,.15)"></span>วันหยุดนักขัตฤกษ์</div>
       <div style="opacity:.7">= เหมาจ่าย OT 🌅</div>
     `;
   }
