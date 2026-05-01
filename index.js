@@ -17,9 +17,22 @@ const lineConfig = {
 };
 const client = new line.Client(lineConfig);
 const app    = express();
+const crypto = require("crypto");
+
+// ── Webhook ต้องมาก่อน express.json() เสมอ ──────────────────
+app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
+  res.json({ status: "ok" });
+  const body   = req.body;
+  const sig    = req.headers["x-line-signature"];
+  const hash   = crypto.createHmac("SHA256", process.env.LINE_SECRET)
+                        .update(body).digest("base64");
+  if (sig !== hash) return;
+  const events = JSON.parse(body.toString()).events || [];
+  await Promise.all(events.map(handleBotEvent));
+});
 
 // ── Middleware ───────────────────────────────────────────────
-app.use("/api", express.json()); // json only for API routes
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public"))); // serve LIFF HTML
 
 // ── Google Sheets ────────────────────────────────────────────
@@ -268,24 +281,6 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
-
-// ══════════════════════════════════════════════════════════════
-// LINE BOT WEBHOOK (เหมือนเดิม)
-// ══════════════════════════════════════════════════════════════
-app.post("/webhook", express.text({type: "*/*"}), async (req, res) => {
-  res.json({ status: "ok" });
-  const crypto = require("crypto");
-  const body = req.body;
-  const sig = req.headers["x-line-signature"];
-  const hash = crypto.createHmac("SHA256", process.env.LINE_SECRET).update(body).digest("base64");
-  if (sig !== hash) return;
-  const events = JSON.parse(body).events || [];
-  await Promise.all(events.map(handleBotEvent));
-  return;
-  // dummy
-  res.json({ status: "ok" });
-  await Promise.all(req.body.events.map(handleBotEvent));
 });
 
 app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running"));
