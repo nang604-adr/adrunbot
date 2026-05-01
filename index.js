@@ -19,7 +19,7 @@ const client = new line.Client(lineConfig);
 const app    = express();
 
 // ── Middleware ───────────────────────────────────────────────
-app.use(express.json());
+app.use("/api", express.json()); // json only for API routes
 app.use(express.static(path.join(__dirname, "public"))); // serve LIFF HTML
 
 // ── Google Sheets ────────────────────────────────────────────
