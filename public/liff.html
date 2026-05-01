@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>OT บริษัท Adrun</title>
 <script src="https://static.line-scdn.net/liff/edge/versions/2.22.3/sdk.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
@@ -386,10 +387,12 @@ textarea{resize:none;height:70px}
         <button class="sub-tab active" onclick="showAdminSub('overview')" id="stab-overview">📊 ภาพรวม</button>
         <button class="sub-tab" onclick="showAdminSub('chart')" id="stab-chart">📈 กราฟ</button>
         <button class="sub-tab" onclick="showAdminSub('requests')" id="stab-requests">🔧 แก้ไข</button>
+        <button class="sub-tab" onclick="showAdminSub('payroll')" id="stab-payroll">💰 จ่ายเงิน</button>
       </div>
       <div id="admin-overview"></div>
       <div id="admin-chart" style="display:none"></div>
       <div id="admin-requests" style="display:none"></div>
+      <div id="admin-payroll" style="display:none"></div>
     </div>
 
     <!-- ══════════════════ SETTINGS TAB ══════════════════ -->
@@ -924,6 +927,7 @@ function renderMyOT(records) {
     const [dd,mm,yy] = r.date.split("/");
     const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
     const isWday = r.otType === "วันธรรมดา";
+    const isPaid = !!r.paidAt;
     const desc = isWday ? `${r.startTime}–${r.endTime} ${r.task}` : `${r.otType} ${r.task}`;
     const rowBg = isWday ? "" : `background:rgba(255,213,79,.03)`;
     const dateBoxStyle = isWday ? "" : `border:1px solid rgba(255,213,79,.2)`;
@@ -939,10 +943,13 @@ function renderMyOT(records) {
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;flex-wrap:wrap">
             <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:'🌅 '+r.otType}</span>
+            ${isPaid ? `<span class="badge badge-ok" title="${r.paidAt}">✅ จ่ายแล้ว</span>` : `<span class="badge badge-pend">⏳ รอจ่าย</span>`}
           </div>
           ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
         </div>
-        <button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${desc.replace(/'/g,"\\'")}')">🔧</button>
+        ${isPaid
+          ? `<button class="btn btn-grey btn-sm" disabled title="จ่ายแล้ว แก้ไขไม่ได้" style="opacity:.4;cursor:not-allowed">🔒</button>`
+          : `<button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${desc.replace(/'/g,"\\'")}')">🔧</button>`}
       </div>
     </div>`;
   }).join("");
@@ -1058,13 +1065,14 @@ async function loadAdmin() {
 
 function showAdminSub(sub) {
   STATE.adminSub = sub;
-  ["overview","chart","requests"].forEach(s => {
+  ["overview","chart","requests","payroll"].forEach(s => {
     document.getElementById(`admin-${s}`).style.display = s===sub?"block":"none";
     document.getElementById(`stab-${s}`).classList.toggle("active", s===sub);
   });
   if (sub==="overview") renderAdminOverview();
   if (sub==="chart")    renderAdminChart();
   if (sub==="requests") renderAdminRequests();
+  if (sub==="payroll")  renderAdminPayroll();
 }
 
 // ★ v1.11: Admin Overview with employee selector + heatmap
@@ -1144,6 +1152,9 @@ function renderAdminOverview() {
       <div class="kpi" style="border-color:#ffd54f"><div class="kpi-label">วันหยุด</div><div class="kpi-val" style="color:#ffd54f">${holDays}</div><div class="kpi-label">วัน</div></div>
       <div class="kpi" style="border-color:#ef6c00"><div class="kpi-label">รอแก้ไข</div><div class="kpi-val" style="color:#ffb74d">${pendingReqs}</div><div class="kpi-label">คำขอ</div></div>
     </div>
+    <div style="margin-bottom:12px;text-align:right">
+      <button class="btn btn-grey btn-sm" onclick="exportMonthlyExcel(${sel?`'${sel.replace(/'/g,"\\'")}'`:'""'})">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</button>
+    </div>
     ${bodyHtml}
   `;
 
@@ -1220,6 +1231,7 @@ function renderAdminEmpList(name, records) {
     const [dd,mm,yy] = r.date.split("/");
     const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
     const isWday = r.otType === "วันธรรมดา";
+    const isPaid = !!r.paidAt;
     const rowBg = isWday ? "" : "background:rgba(255,213,79,.03)";
     const dateBoxStyle = isWday ? "" : "border:1px solid rgba(255,213,79,.2)";
     const ddColor = isWday ? "" : "color:#ffd54f";
@@ -1232,8 +1244,9 @@ function renderAdminEmpList(name, records) {
             <div class="ot-date-mm">/${mm}</div>
           </div>
           <div style="flex:1;min-width:0">
-            <div style="margin-bottom:4px">
+            <div style="margin-bottom:4px;display:flex;gap:5px;flex-wrap:wrap">
               <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:'🌅 '+r.otType}</span>
+              ${isPaid ? `<span class="badge badge-ok" title="${r.paidAt}">✅ จ่ายแล้ว</span>` : `<span class="badge badge-pend">⏳ รอจ่าย</span>`}
             </div>
             ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
           </div>
@@ -1523,6 +1536,333 @@ async function handleRequest(idx, status) {
   });
   toast(status==="อนุมัติแล้ว"?"✅ อนุมัติแล้ว":"❌ ปฏิเสธแล้ว", status==="อนุมัติแล้ว"?"ok":"err");
   await loadAdmin();
+}
+
+// ══════════════════════════════════════════════════════════════
+// PAYROLL (v1.15)
+// ══════════════════════════════════════════════════════════════
+let payrollPreview = null;
+let payrollHistory = [];
+
+function todayThai() {
+  const d = new Date();
+  return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()+543}`;
+}
+function pad2(n) { return String(n).padStart(2, "0"); }
+
+async function renderAdminPayroll() {
+  if (!STATE.payrollCutoff) STATE.payrollCutoff = todayThai();
+
+  document.getElementById("admin-payroll").innerHTML = `
+    <div class="card">
+      <div class="card-body">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <span style="font-size:16px">💰</span>
+          <span style="font-size:14px;font-weight:700">ทำจ่าย OT รอบใหม่</span>
+        </div>
+        <div style="font-size:11px;color:var(--sub);line-height:1.7;margin-bottom:12px">
+          เลือกวันที่ตัดรอบ — record ทุกอันที่ <b>วันที่ทำงาน ≤ cutoff</b> และยังไม่จ่าย จะถูกรวมในรอบนี้
+        </div>
+
+        <label style="font-size:10px;color:var(--sub);margin-bottom:5px">วันที่ตัดรอบ (DD/MM/YYYY พ.ศ.):</label>
+        <input id="payCutoff" placeholder="28/05/2569" value="${STATE.payrollCutoff}" maxlength="10" oninput="formatThaiDate(this)" style="margin-bottom:10px">
+        <button class="btn btn-grey btn-sm" onclick="loadPayrollPreview()" style="width:100%">🔍 ดูตัวอย่าง</button>
+      </div>
+    </div>
+
+    <div id="payPreviewArea"></div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="card-header">📜 ประวัติการจ่าย</div>
+      <div id="payHistoryList"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>
+    </div>
+  `;
+
+  await loadPayrollHistory();
+}
+
+async function loadPayrollPreview() {
+  const cutoff = document.getElementById("payCutoff").value.trim();
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
+    return toast("กรุณาใส่วันที่ในรูป DD/MM/YYYY", "err");
+  }
+  STATE.payrollCutoff = cutoff;
+
+  const area = document.getElementById("payPreviewArea");
+  area.innerHTML = `<div class="card"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>`;
+
+  try {
+    const res = await fetch(`/api/payroll/preview?cutoff=${encodeURIComponent(cutoff)}`);
+    const data = await res.json();
+    if (!res.ok) {
+      area.innerHTML = `<div class="err-box" style="display:block">⚠️ ${data.error}</div>`;
+      return;
+    }
+    payrollPreview = data;
+    renderPayrollPreview(data);
+  } catch (e) {
+    area.innerHTML = `<div class="err-box" style="display:block">⚠️ เชื่อมต่อไม่ได้</div>`;
+  }
+}
+
+function renderPayrollPreview(data) {
+  const t = data.totals;
+  const summaryHtml = data.summary.length === 0
+    ? `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ไม่มีรายการรอจ่ายในช่วงนี้</div>`
+    : data.summary.map(e => `
+        <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${e.name}</div>
+            <div style="font-size:10px;color:var(--sub)">${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays}</div>
+          </div>
+          <div style="color:#81c784;font-weight:700">${e.pay.toLocaleString()} ฿</div>
+        </div>
+      `).join("");
+
+  const carryHtml = data.carry.length === 0
+    ? ""
+    : `
+      <div class="card" style="margin-top:10px;border:1px solid rgba(255,167,38,.2)">
+        <div class="card-header" style="color:#ffb74d">⏭️ คงค้าง — จะรวมในรอบถัดไป (${data.carry.length} รายการ)</div>
+        <div style="padding:8px 12px;font-size:11px;color:var(--sub);max-height:140px;overflow-y:auto">
+          ${data.carry.map(r => `<div><b style="color:#e8eaf6">${r.name}</b> ${r.date} ${r.startTime!=="-"?r.startTime+"–"+r.endTime:r.otType} <span style="color:#ffb74d">${r.pay}฿</span></div>`).join("")}
+        </div>
+      </div>
+    `;
+
+  document.getElementById("payPreviewArea").innerHTML = `
+    <div class="card" style="margin-top:12px;border:1px solid rgba(0,185,0,.25)">
+      <div class="card-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+          <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+            <div style="font-size:18px;font-weight:800;color:#81c784">${t.records}</div>
+            <div style="font-size:9px;color:var(--sub)">รายการ</div>
+          </div>
+          <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+            <div style="font-size:18px;font-weight:800;color:#9fa8da">${t.employees}</div>
+            <div style="font-size:9px;color:var(--sub)">พนักงาน</div>
+          </div>
+          <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+            <div style="font-size:18px;font-weight:800;color:#ffd54f">${t.totalPay.toLocaleString()}</div>
+            <div style="font-size:9px;color:var(--sub)">บาท</div>
+          </div>
+        </div>
+
+        <div class="card-header" style="border:0;padding:0 0 6px;font-size:11px">รายชื่อในรอบนี้:</div>
+        <div style="background:#141829;border-radius:10px;max-height:200px;overflow-y:auto">${summaryHtml}</div>
+
+        ${data.summary.length > 0 ? `
+          <div style="height:12px"></div>
+          <button class="btn btn-green" onclick="commitPayroll()">💾 บันทึกการจ่าย + Download Excel</button>
+        ` : ""}
+      </div>
+    </div>
+    ${carryHtml}
+  `;
+}
+
+async function commitPayroll() {
+  if (!payrollPreview || payrollPreview.summary.length === 0) return;
+  if (!confirm(`ยืนยันทำจ่าย ${payrollPreview.totals.records} รายการ รวม ${payrollPreview.totals.totalPay.toLocaleString()} ฿?\n\nหลังจากนี้รายการเหล่านี้จะถูก lock — แก้ไขไม่ได้\n(แต่ admin undo ได้)`)) return;
+
+  const cutoff = STATE.payrollCutoff;
+  const adminName = STATE.empData?.name || STATE.displayName || "Admin";
+
+  try {
+    const res = await fetch("/api/payroll/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cutoff, createdBy: adminName }),
+    });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "บันทึกไม่สำเร็จ", "err");
+
+    // Generate Excel using cached preview data
+    generatePayrollExcel(payrollPreview, data.payId, data.committedAt, adminName);
+
+    toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
+    payrollPreview = null;
+    document.getElementById("payPreviewArea").innerHTML = "";
+    await loadPayrollHistory();
+    await loadAdmin();  // refresh admin records to show paid status
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+async function loadPayrollHistory() {
+  try {
+    const res = await fetch("/api/payroll/history");
+    const data = await res.json();
+    payrollHistory = data.history || [];
+    renderPayrollHistory();
+  } catch (e) {
+    document.getElementById("payHistoryList").innerHTML = `<div style="padding:20px;text-align:center;color:#ef9a9a;font-size:12px">โหลดประวัติไม่ได้</div>`;
+  }
+}
+
+function renderPayrollHistory() {
+  if (!payrollHistory.length) {
+    document.getElementById("payHistoryList").innerHTML = `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีประวัติการจ่าย</div>`;
+    return;
+  }
+  const html = payrollHistory.slice().reverse().map(p => {
+    const isUndone = p.status === "undone";
+    const ico = isUndone ? "🔄" : "✅";
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);${isUndone?"opacity:.55":""}">
+        <div style="font-size:16px">${ico}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
+          <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${p.createdBy}</div>
+          ${isUndone ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิกเมื่อ ${p.undoneAt} โดย ${p.undoneBy||"-"}</div>` : ""}
+        </div>
+        ${!isUndone ? `<button class="btn btn-red btn-sm" onclick="undoPayroll('${p.payId}')">↺ Undo</button>` : ""}
+      </div>
+    `;
+  }).join("");
+  document.getElementById("payHistoryList").innerHTML = html;
+}
+
+async function undoPayroll(payId) {
+  if (!confirm(`ยกเลิกรอบจ่าย ${payId}?\n\nrecord ทั้งหมดในรอบนี้จะกลับเป็น "ยังไม่จ่าย" และต้องทำใหม่`)) return;
+  try {
+    const adminName = STATE.empData?.name || STATE.displayName || "Admin";
+    const res = await fetch("/api/payroll/undo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payId, undoneBy: adminName }),
+    });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "Undo ไม่สำเร็จ", "err");
+    toast(`↺ ยกเลิก ${data.recordsRestored} รายการ`, "ok");
+    await loadPayrollHistory();
+    await loadAdmin();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+// ── Excel Export Helpers ─────────────────────────────────
+function generatePayrollExcel(preview, payId, committedAt, adminName) {
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Summary
+  const sumRows = [
+    ["ใบรายการจ่าย OT"],
+    ["รอบจ่าย:", preview.cutoff, "", "Payroll ID:", payId],
+    ["จัดทำเมื่อ:", committedAt, "", "ทำโดย:", adminName],
+    [],
+    ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง (วันธรรมดา)","วันหยุด (ครั้ง)","ค่า OT รวม (฿)"],
+  ];
+  preview.summary.forEach((e, i) => {
+    sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay]);
+  });
+  sumRows.push([]);
+  sumRows.push(["รวมทั้งหมด", "", preview.summary.reduce((s,e)=>s+e.days,0), preview.totals.totalHours, preview.totals.totalHolidays, preview.totals.totalPay]);
+
+  const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
+  ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:18},{wch:14},{wch:16}];
+  XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+
+  // Sheet 2: Details
+  const detailRows = [
+    ["ชื่อพนักงาน","วันที่","เริ่ม","สิ้นสุด","ชั่วโมง","งานที่ทำ","สถานที่","ประเภท","ค่า OT (฿)","Payroll ID"],
+  ];
+  preview.records
+    .slice()
+    .sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date))
+    .forEach(r => {
+      detailRows.push([
+        r.name, r.date, r.startTime, r.endTime, r.hours,
+        r.task||"", r.location||"", r.otType, r.pay, payId,
+      ]);
+    });
+  const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+  ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20}];
+  XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+
+  // Sheet 3: Carry forward
+  if (preview.carry.length > 0) {
+    const carryRows = [
+      ["รายการคงค้าง — จะรวมในรอบถัดไป"],
+      [],
+      ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชั่วโมง","ประเภท","ค่า OT (฿)"],
+    ];
+    preview.carry.forEach(r => {
+      carryRows.push([r.name, r.date, r.startTime, r.endTime, r.hours, r.otType, r.pay]);
+    });
+    const ws3 = XLSX.utils.aoa_to_sheet(carryRows);
+    ws3["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:16},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, ws3, "คงค้าง");
+  }
+
+  XLSX.writeFile(wb, `Payroll_${payId}_${preview.cutoff.replace(/\//g,"-")}.xlsx`);
+}
+
+// ── Monthly Export (Option C) ─────────────────────────────
+function exportMonthlyExcel(employeeFilter) {
+  const d = new Date();
+  const monthLabel = MONTHS_SHORT[d.getMonth()];
+  const yearLabel = d.getFullYear()+543;
+  const recs = employeeFilter ? adminRecords.filter(r => r.name === employeeFilter) : adminRecords;
+  if (!recs.length) return toast("ไม่มีข้อมูลให้ export", "err");
+
+  const wb = XLSX.utils.book_new();
+
+  // Summary by employee
+  const byEmp = {};
+  recs.forEach(r => {
+    byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+    byEmp[r.name].days.add(r.date);
+    byEmp[r.name].count += 1;
+    byEmp[r.name].pay   += r.pay;
+    if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
+    else                          byEmp[r.name].holidays += 1;
+  });
+  const summary = Object.values(byEmp).map(e => ({
+    name: e.name, days: e.days.size, hours: +e.hours.toFixed(2), holidays: e.holidays, pay: e.pay,
+  })).sort((a,b) => b.pay - a.pay);
+
+  const sumRows = [
+    [`สรุป OT — ${monthLabel} ${yearLabel}${employeeFilter?` — ${employeeFilter}`:""}`],
+    [],
+    ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง (วันธรรมดา)","วันหยุด (ครั้ง)","ค่า OT (฿)","สถานะจ่าย"],
+  ];
+  summary.forEach((e, i) => {
+    const empRecs = recs.filter(r => r.name === e.name);
+    const allPaid = empRecs.every(r => r.paidAt);
+    const somePaid = empRecs.some(r => r.paidAt);
+    const status = allPaid ? "✅ จ่ายแล้วครบ" : somePaid ? "⏳ จ่ายบางส่วน" : "⏳ ยังไม่จ่าย";
+    sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay, status]);
+  });
+  sumRows.push([]);
+  sumRows.push(["รวมทั้งหมด","",summary.reduce((s,e)=>s+e.days,0),summary.reduce((s,e)=>s+e.hours,0).toFixed(2),summary.reduce((s,e)=>s+e.holidays,0),summary.reduce((s,e)=>s+e.pay,0),""]);
+
+  const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
+  ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:18},{wch:14},{wch:16},{wch:18}];
+  XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+
+  // Details
+  const detailRows = [
+    ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชม.","งาน","สถานที่","ประเภท","ค่า (฿)","Payroll ID","สถานะ"],
+  ];
+  recs.slice().sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date)).forEach(r => {
+    detailRows.push([
+      r.name, r.date, r.startTime, r.endTime, r.hours,
+      r.task||"", r.location||"", r.otType, r.pay,
+      r.paidAt || "", r.paidAt ? "✅ จ่ายแล้ว" : "⏳ รอจ่าย",
+    ]);
+  });
+  const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+  ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+
+  const fileName = employeeFilter
+    ? `OT_${employeeFilter}_${monthLabel}_${yearLabel}.xlsx`
+    : `OT_All_${monthLabel}_${yearLabel}.xlsx`;
+  XLSX.writeFile(wb, fileName);
+  toast(`📥 Export ${recs.length} รายการ`, "ok");
 }
 
 // ══════════════════════════════════════════════════════════════

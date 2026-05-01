@@ -365,7 +365,15 @@ app.post("/api/edit-request", async (req, res) => {
   const { name, date, recordDesc, note } = req.body;
   try {
     const sheets = await getSheetsClient();
-    const now    = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+
+    // ★ v1.15: เช็คว่า record ที่ขอแก้นั้น "จ่ายแล้ว" หรือยัง
+    const all = await getAllRecords(sheets);
+    const matched = all.find(r => r.name === name && r.date === date);
+    if (matched && matched.paidAt) {
+      return res.status(400).json({ error: `รายการนี้ทำจ่ายไปแล้ว (รอบ ${matched.paidAt}) ไม่สามารถแก้ไขได้` });
+    }
+
+    const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: "Edit_Requests!A:F",
@@ -375,6 +383,212 @@ app.post("/api/edit-request", async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// PAYROLL ENDPOINTS (v1.15)
+// ══════════════════════════════════════════════════════════════
+
+// ── Helper: เปรียบเทียบวันที่ Thai dd/mm/yyyy ที่ <= cutoff ───
+function isOnOrBeforeCutoff(recordDate, cutoffDate) {
+  const [d1,m1,y1] = recordDate.split("/").map(Number);
+  const [d2,m2,y2] = cutoffDate.split("/").map(Number);
+  const t1 = new Date(y1-543, m1-1, d1).getTime();
+  const t2 = new Date(y2-543, m2-1, d2).getTime();
+  return t1 <= t2;
+}
+
+// ── GET /api/payroll/preview?cutoff=DD/MM/YYYY ────────────
+// ดูตัวอย่างก่อนจ่าย — รวม pending records ทั้งหมด ที่ date ≤ cutoff
+app.get("/api/payroll/preview", async (req, res) => {
+  const { cutoff } = req.query;
+  if (!cutoff || !/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
+    return res.status(400).json({ error: "cutoff ต้องอยู่ในรูป DD/MM/YYYY (พ.ศ.)" });
+  }
+  try {
+    const sheets  = await getSheetsClient();
+    const all     = await getAllRecords(sheets);
+    const pending = all.filter(r => !r.paidAt && r.name && r.date && isOnOrBeforeCutoff(r.date, cutoff));
+    const carry   = all.filter(r => !r.paidAt && r.name && r.date && !isOnOrBeforeCutoff(r.date, cutoff));
+
+    // group by employee
+    const byEmp = {};
+    pending.forEach(r => {
+      byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+      byEmp[r.name].days.add(r.date);
+      byEmp[r.name].count += 1;
+      byEmp[r.name].pay   += r.pay;
+      if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
+      else                          byEmp[r.name].holidays += 1;
+    });
+    const summary = Object.values(byEmp).map(e => ({
+      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+      holidays: e.holidays, pay: e.pay, count: e.count,
+    })).sort((a,b) => b.pay - a.pay);
+
+    const totals = {
+      records: pending.length,
+      employees: summary.length,
+      totalPay: summary.reduce((s,e) => s+e.pay, 0),
+      totalHours: +pending.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0).toFixed(2),
+      totalHolidays: pending.filter(r=>r.otType!=="วันธรรมดา").length,
+    };
+
+    res.json({
+      cutoff, totals, summary,
+      records: pending,
+      carry: carry.map(r => ({ name:r.name, date:r.date, startTime:r.startTime, endTime:r.endTime, hours:r.hours, otType:r.otType, pay:r.pay })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/payroll/commit — Confirm จ่าย → mark column K ─
+app.post("/api/payroll/commit", async (req, res) => {
+  const { cutoff, createdBy } = req.body;
+  if (!cutoff || !/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
+    return res.status(400).json({ error: "cutoff ต้องอยู่ในรูป DD/MM/YYYY" });
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllRecords(sheets);
+    const pending = all.filter(r => !r.paidAt && r.name && r.date && isOnOrBeforeCutoff(r.date, cutoff));
+
+    if (pending.length === 0) return res.status(400).json({ error: "ไม่มีรายการให้จ่ายในรอบนี้" });
+
+    // สร้าง payroll ID — PAY-YYYYMMDD-HHMM
+    const now = new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Bangkok"}));
+    const yyyy = now.getFullYear()+543;
+    const mm   = String(now.getMonth()+1).padStart(2,"0");
+    const dd   = String(now.getDate()).padStart(2,"0");
+    const hh   = String(now.getHours()).padStart(2,"0");
+    const min  = String(now.getMinutes()).padStart(2,"0");
+    const payId = `PAY-${yyyy}${mm}${dd}-${hh}${min}`;
+    const nowStr = `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+
+    // Mark column K ของแต่ละ pending record (batch update)
+    const updates = pending.map(r => ({
+      range: `OT_Records!K${idxToRow(r.idx)}`,
+      values: [[payId]],
+    }));
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      resource: {
+        valueInputOption: "USER_ENTERED",
+        data: updates,
+      },
+    });
+
+    // คำนวณยอด
+    const employees = new Set(pending.map(r => r.name));
+    const totalPay  = pending.reduce((s,r) => s+r.pay, 0);
+
+    // เขียน Payroll_Log (ถ้า tab มีอยู่)
+    try {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: "Payroll_Log!A:J",
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [[
+          payId, cutoff, nowStr,
+          pending.length, employees.size, totalPay,
+          createdBy || "Admin", "active", "", "",
+        ]] },
+      });
+    } catch (logErr) {
+      console.error("Payroll_Log write failed (tab อาจยังไม่มี):", logErr.message);
+    }
+
+    res.json({
+      ok: true,
+      payId,
+      cutoff,
+      committedAt: nowStr,
+      records: pending.length,
+      employees: employees.size,
+      totalPay,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/payroll/undo — ปลด record ในรอบนั้นกลับเป็น pending ──
+app.post("/api/payroll/undo", async (req, res) => {
+  const { payId, undoneBy } = req.body;
+  if (!payId) return res.status(400).json({ error: "ระบุ payId" });
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllRecords(sheets);
+    const target = all.filter(r => r.paidAt === payId);
+    if (target.length === 0) return res.status(400).json({ error: `ไม่พบ records ในรอบ ${payId}` });
+
+    // ปลด column K ของทุก record ในรอบ
+    const updates = target.map(r => ({
+      range: `OT_Records!K${idxToRow(r.idx)}`,
+      values: [[""]],
+    }));
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      resource: { valueInputOption: "USER_ENTERED", data: updates },
+    });
+
+    // อัปเดต Payroll_Log status = "undone"
+    try {
+      const r = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: "Payroll_Log!A3:J5000",
+      });
+      const rows = r.data.values || [];
+      const logIdx = rows.findIndex(row => row[0] === payId);
+      if (logIdx >= 0) {
+        const row = logIdx + 3;
+        const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `Payroll_Log!H${row}:J${row}`,
+          valueInputOption: "USER_ENTERED",
+          resource: { values: [["undone", now, undoneBy || "Admin"]] },
+        });
+      }
+    } catch (logErr) {
+      console.error("Payroll_Log update failed:", logErr.message);
+    }
+
+    res.json({ ok: true, payId, recordsRestored: target.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/payroll/history — ดูประวัติการจ่ายเงิน ──────────
+app.get("/api/payroll/history", async (req, res) => {
+  try {
+    const sheets = await getSheetsClient();
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: "Payroll_Log!A3:J5000",
+    });
+    const rows = (r.data.values || []).map((row, i) => ({
+      idx: i,
+      payId: row[0] || "",
+      cutoff: row[1] || "",
+      createdAt: row[2] || "",
+      records: Number(row[3]) || 0,
+      employees: Number(row[4]) || 0,
+      totalPay: Number(row[5]) || 0,
+      createdBy: row[6] || "",
+      status: row[7] || "active",
+      undoneAt: row[8] || "",
+      undoneBy: row[9] || "",
+    })).filter(r => r.payId);
+    res.json({ history: rows.reverse() }); // ล่าสุดอยู่บน
+  } catch (e) {
+    // tab ไม่มีก็ส่ง array เปล่า
+    res.json({ history: [] });
   }
 });
 
@@ -475,13 +689,14 @@ async function getHolidayList(sheets) {
 async function getAllRecords(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "OT_Records!A3:J20000",  // ★ v1.14: ขยายจาก 2000 → 20000 (~12 ปี)
+    range: "OT_Records!A3:K20000",  // ★ v1.15: เพิ่ม column K (paidAt)
   });
   return (r.data.values || []).map((row, i) => ({
     idx: i, name: row[0]||"", date: row[1]||"",
     startTime: row[2]||"-", endTime: row[3]||"-",
     hours: Number(row[4])||0, task: row[5]||"", location: row[6]||"",
     otType: row[7]||"", pay: Number(row[8])||0, createdAt: row[9]||"",
+    paidAt: (row[10]||"").trim(),  // ★ v1.15: ID รอบจ่ายเงิน (เช่น "PAY-20260528-1430")
   }));
 }
 
