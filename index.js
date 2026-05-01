@@ -273,7 +273,17 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // LINE BOT WEBHOOK (เหมือนเดิม)
 // ══════════════════════════════════════════════════════════════
-app.post("/webhook", express.raw({type: "*/*"}), line.middleware(lineConfig), async (req, res) => {
+app.post("/webhook", express.text({type: "*/*"}), async (req, res) => {
+  res.json({ status: "ok" });
+  const crypto = require("crypto");
+  const body = req.body;
+  const sig = req.headers["x-line-signature"];
+  const hash = crypto.createHmac("SHA256", process.env.LINE_SECRET).update(body).digest("base64");
+  if (sig !== hash) return;
+  const events = JSON.parse(body).events || [];
+  await Promise.all(events.map(handleBotEvent));
+  return;
+  // dummy
   res.json({ status: "ok" });
   await Promise.all(req.body.events.map(handleBotEvent));
 });
