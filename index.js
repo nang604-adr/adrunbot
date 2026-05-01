@@ -27,13 +27,21 @@ const app    = express();
 
 // ── Webhook ต้องมาก่อน express.json() เสมอ ──────────────────
 app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
+  console.log("📨 Webhook received! sig=", req.headers["x-line-signature"]?.slice(0, 20));
   res.json({ status: "ok" });
   const body = req.body;
   const sig  = req.headers["x-line-signature"];
   const hash = crypto.createHmac("SHA256", process.env.LINE_SECRET)
                      .update(body).digest("base64");
-  if (sig !== hash) return;
+  if (sig !== hash) {
+    console.error("❌ Signature mismatch! LINE_SECRET ผิด หรือไม่ตรงกับ Messaging API channel");
+    console.error("   expected:", hash.slice(0, 20));
+    console.error("   received:", sig?.slice(0, 20));
+    return;
+  }
+  console.log("✅ Signature OK");
   const events = JSON.parse(body.toString()).events || [];
+  console.log(`📋 Events: ${events.length}`, events.map(e => `${e.type}:${e.message?.text || ""}`));
   await Promise.all(events.map(handleBotEvent));
 });
 
