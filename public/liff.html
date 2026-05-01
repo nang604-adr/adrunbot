@@ -881,10 +881,10 @@ async function loadMyOT() {
 }
 
 function renderMyMonthRow(records) {
-  // สร้าง list 6 เดือนย้อนหลัง
+  // ★ v1.18.1: 3 เดือนย้อนหลัง
   const chips = [];
   const d = new Date();
-  for (let i=5;i>=0;i--) {
+  for (let i=2;i>=0;i--) {
     const m2 = new Date(d.getFullYear(), d.getMonth()-i, 1);
     const mm = String(m2.getMonth()+1).padStart(2,"0");
     const yy = String(m2.getFullYear()+543);
