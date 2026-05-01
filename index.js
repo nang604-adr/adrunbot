@@ -273,7 +273,7 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // LINE BOT WEBHOOK (เหมือนเดิม)
 // ══════════════════════════════════════════════════════════════
-app.post("/webhook", line.middleware(lineConfig), async (req, res) => {
+app.post("/webhook", express.raw({type: "*/*"}), line.middleware(lineConfig), async (req, res) => {
   res.json({ status: "ok" });
   await Promise.all(req.body.events.map(handleBotEvent));
 });
