@@ -302,11 +302,7 @@ app.post("/api/ot", async (req, res) => {
     const hours = calcHours(startTime, endTime);
     if (hours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
 
-    // ★ v1.5: OT ต้องอยู่ในช่วง 06:00 ถึง 06:00 ของวันถัดไป
-    const otWindowErr = validateOTWindow(startTime, endTime);
-    if (otWindowErr) return res.status(400).json({ error: otWindowErr });
-
-    // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ จันทร์–เสาร์ 08:30–17:30
+    // ★ v1.6: ลงเวลาได้ทุกช่วง (รวม 01:00-04:00 = OT คืนวันนั้น) ห้ามแค่ทับเวลางาน 08:30–17:30
     if (overlapsWorkHours(startTime, endTime)) {
       return res.status(400).json({ error: "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
     }
@@ -621,11 +617,7 @@ async function handleBotEvent(event) {
     const already  = await getDayHours(sheets, empData.name, todayDate);
     if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
 
-    // ★ v1.5: OT ต้องอยู่ในช่วง 06:00 ถึง 06:00 ของวันถัดไป
-    const otWindowErr = validateOTWindow(startTime, endTime);
-    if (otWindowErr) return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ${otWindowErr}` });
-
-    // ★ v1.3: ห้ามลง OT ทับเวลางานปกติ
+    // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางาน 08:30–17:30
     if (overlapsWorkHours(startTime, endTime)) {
       return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
     }
