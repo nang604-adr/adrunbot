@@ -1782,26 +1782,32 @@ async function loadPayrollHistory() {
 }
 
 function renderPayrollHistory() {
-  if (!payrollHistory.length) {
-    document.getElementById("payHistoryList").innerHTML = `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีประวัติการจ่าย</div>`;
+  // ★ v1.15.3: ซ่อน undone entries จาก default view
+  const active = payrollHistory.filter(p => p.status !== "undone");
+  const undoneCount = payrollHistory.length - active.length;
+
+  if (!active.length) {
+    const note = undoneCount > 0
+      ? `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีรอบจ่ายที่ active<br><span style="font-size:11px;opacity:.7">(${undoneCount} รอบที่ถูกยกเลิก — ดูใน Payroll_Log Sheet)</span></div>`
+      : `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีประวัติการจ่าย</div>`;
+    document.getElementById("payHistoryList").innerHTML = note;
     return;
   }
-  const html = payrollHistory.slice().reverse().map(p => {
-    const isUndone = p.status === "undone";
-    const ico = isUndone ? "🔄" : "✅";
-    return `
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);${isUndone?"opacity:.55":""}">
-        <div style="font-size:16px">${ico}</div>
-        <div style="flex:1;min-width:0">
-          <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
-          <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${p.createdBy}</div>
-          ${isUndone ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิกเมื่อ ${p.undoneAt} โดย ${p.undoneBy||"-"}</div>` : ""}
-        </div>
-        ${!isUndone ? `<button class="btn btn-red btn-sm" onclick="undoPayroll('${p.payId}')">↺ Undo</button>` : ""}
+
+  const html = active.slice().reverse().map(p => `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border)">
+      <div style="font-size:16px">✅</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
+        <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${p.createdBy}</div>
       </div>
-    `;
-  }).join("");
-  document.getElementById("payHistoryList").innerHTML = html;
+      <button class="btn btn-red btn-sm" onclick="undoPayroll('${p.payId}')">↺ Undo</button>
+    </div>
+  `).join("");
+  const footer = undoneCount > 0
+    ? `<div style="padding:8px 12px;font-size:10px;color:var(--sub);text-align:center;font-style:italic;border-top:1px solid var(--border)">+ ${undoneCount} รอบที่ยกเลิกแล้ว (ดูใน Payroll_Log Sheet)</div>`
+    : "";
+  document.getElementById("payHistoryList").innerHTML = html + footer;
 }
 
 async function undoPayroll(payId) {
@@ -1824,6 +1830,42 @@ async function undoPayroll(payId) {
 }
 
 // ── Excel Export Helpers ─────────────────────────────────
+// ★ v1.15.3: Robust download with fallback
+function downloadXlsx(wb, filename) {
+  if (typeof XLSX === "undefined") {
+    alert("⚠️ Excel library โหลดไม่สำเร็จ\nกรุณา refresh หน้าใหม่ แล้วลองอีกครั้ง");
+    return false;
+  }
+  // ASCII-only filename (กัน Thai chars ปัญหา)
+  const safeName = filename.replace(/[^\x00-\x7F]/g, "_");
+  try {
+    // Method 1: native writeFile (works on most browsers)
+    XLSX.writeFile(wb, safeName);
+    return true;
+  } catch (e1) {
+    console.error("XLSX.writeFile failed:", e1);
+    // Method 2: Manual blob download
+    try {
+      const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = safeName;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch (e2) {
+      console.error("Blob download failed:", e2);
+      alert(`⚠️ ดาวน์โหลดไม่สำเร็จ\n\n${e2.message}\n\nลองเปิดใน Safari/Chrome แทน LIFF browser\n(กดปุ่ม ⋮ มุมขวาบน → "เปิดในเบราว์เซอร์")`);
+      return false;
+    }
+  }
+}
+
 function generatePayrollExcel(preview, payId, committedAt, adminName) {
   const wb = XLSX.utils.book_new();
 
@@ -1877,7 +1919,8 @@ function generatePayrollExcel(preview, payId, committedAt, adminName) {
     XLSX.utils.book_append_sheet(wb, ws3, "คงค้าง");
   }
 
-  XLSX.writeFile(wb, `Payroll_${payId}_${preview.cutoff.replace(/\//g,"-")}.xlsx`);
+  const fname = `Payroll_${payId}_${preview.cutoff.replace(/\//g,"-")}.xlsx`;
+  if (downloadXlsx(wb, fname)) toast(`📥 ${fname}`, "ok");
 }
 
 // ── Monthly Export (Option C) ─────────────────────────────
@@ -1938,11 +1981,14 @@ function exportMonthlyExcel(employeeFilter) {
   ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20},{wch:14}];
   XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
 
+  // ★ v1.15.3: ASCII filename (กัน Thai char ปัญหา)
+  const d2 = new Date();
+  const mNum = String(d2.getMonth()+1).padStart(2,"0");
+  const yNum = d2.getFullYear()+543;
   const fileName = employeeFilter
-    ? `OT_${employeeFilter}_${monthLabel}_${yearLabel}.xlsx`
-    : `OT_All_${monthLabel}_${yearLabel}.xlsx`;
-  XLSX.writeFile(wb, fileName);
-  toast(`📥 Export ${recs.length} รายการ`, "ok");
+    ? `OT_${employeeFilter}_${mNum}-${yNum}.xlsx`
+    : `OT_All_${mNum}-${yNum}.xlsx`;
+  if (downloadXlsx(wb, fileName)) toast(`📥 Export ${recs.length} รายการ`, "ok");
 }
 
 // ══════════════════════════════════════════════════════════════
