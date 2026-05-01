@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>OT บริษัท Adrun</title>
+<script src="https://static.line-scdn.net/liff/edge/versions/2.22.3/sdk.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --green:#00b900;--green2:#00d400;--green3:#e8f5e9;
+  --bg:#111420;--card:#1e2438;--card2:#2a2f48;
+  --text:#e8eaf6;--sub:#78909c;--border:rgba(255,255,255,0.07);
+  --orange:#ef6c00;--red:#ef5350;--yellow:#ffd54f;--blue:#5c6bc0;
+}
+body{font-family:'Noto Sans Thai',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+
+/* ── Loading ── */
+#loading{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:999}
+.spinner{width:40px;height:40px;border:3px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Top bar ── */
+#topbar{background:#141829;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
+.logo{font-size:15px;font-weight:800;color:var(--text)}
+.logo span{color:var(--green)}
+.user-chip{display:flex;align-items:center;gap:6px;background:var(--card2);border-radius:20px;padding:4px 10px}
+.user-avatar{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff}
+.user-name{font-size:12px;color:var(--sub);max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.admin-badge{background:rgba(239,108,0,.2);color:var(--orange);font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700}
+
+/* ── Tab bar ── */
+#tabbar{display:flex;background:#141829;border-bottom:1px solid var(--border);position:sticky;top:49px;z-index:40}
+.tab{flex:1;padding:10px 4px;background:none;border:none;cursor:pointer;font-family:'Noto Sans Thai',sans-serif;font-size:11px;color:var(--sub);border-bottom:2px solid transparent;transition:all .2s}
+.tab.active{color:var(--green);border-bottom-color:var(--green);font-weight:700}
+
+/* ── Content ── */
+#content{padding:14px;padding-bottom:80px}
+.section{display:none}.section.show{display:block}
+
+/* ── Cards ── */
+.card{background:var(--card);border-radius:14px;margin-bottom:12px;overflow:hidden;border:1px solid var(--border)}
+.card-header{padding:12px 14px;font-size:12px;font-weight:700;color:var(--sub);border-bottom:1px solid var(--border)}
+.card-body{padding:14px}
+
+/* ── Form elements ── */
+label{display:block;font-size:10px;color:var(--sub);margin-bottom:5px}
+input,select,textarea{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;font-family:'Noto Sans Thai',sans-serif;outline:none}
+input:focus,select:focus,textarea:focus{border-color:rgba(0,185,0,.4)}
+textarea{resize:none;height:70px}
+
+/* ── Date picker button ── */
+.date-btn{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;color:var(--text)}
+.date-btn:active{background:#323850}
+.date-val{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700}
+.day-badge{font-size:11px;padding:2px 8px;border-radius:8px;font-weight:600}
+.day-sun{background:rgba(239,154,154,.15);color:#ef9a9a}
+.day-sat{background:rgba(144,202,249,.15);color:#90caf9}
+.day-wday{background:rgba(165,214,167,.15);color:#81c784}
+
+/* ── Calendar ── */
+.cal-wrap{background:var(--card);border-radius:12px;padding:12px;margin-top:6px;border:1px solid rgba(0,185,0,.2)}
+.cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-nav-btn{background:var(--card2);border:none;border-radius:8px;width:30px;height:30px;color:var(--sub);cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center}
+.cal-title{font-size:13px;font-weight:700;color:var(--text)}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cal-hdr{text-align:center;font-size:9px;padding:3px 0;color:var(--sub)}
+.cal-hdr.sun{color:#ef9a9a}.cal-hdr.sat{color:#90caf9}
+.cal-day{height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;font-size:12px;cursor:pointer;transition:all .1s;border:1px solid transparent}
+.cal-day:empty,.cal-day.empty{cursor:default}
+.cal-day.future{color:rgba(255,255,255,.15);cursor:not-allowed}
+.cal-day.today:not(.selected){border-color:rgba(0,185,0,.4);color:var(--green)}
+.cal-day.selected{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;font-weight:800}
+.cal-day.sun-day{color:#ef9a9a}.cal-day.sat-day{color:#90caf9}
+
+/* ── Time drum ── */
+.time-picker{background:var(--card);border-radius:14px;padding:12px;border:1px solid var(--border)}
+.time-row{display:flex;align-items:center;justify-content:center;gap:10px}
+.time-label{text-align:center;font-size:10px;color:var(--sub);margin-bottom:6px}
+.drum-wrap{position:relative;width:54px;height:120px;overflow:hidden;border-radius:10px}
+.drum-mask-top,.drum-mask-bot{position:absolute;left:0;right:0;height:40px;z-index:2;pointer-events:none}
+.drum-mask-top{top:0;background:linear-gradient(to bottom,var(--card) 30%,transparent)}
+.drum-mask-bot{bottom:0;background:linear-gradient(to top,var(--card) 30%,transparent)}
+.drum-highlight{position:absolute;top:40px;left:4px;right:4px;height:40px;background:rgba(0,185,0,.12);border-radius:8px;border:1px solid rgba(0,185,0,.3);z-index:1;pointer-events:none}
+.drum-scroll{height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;scrollbar-width:none}
+.drum-scroll::-webkit-scrollbar{display:none}
+.drum-item{height:40px;display:flex;align-items:center;justify-content:center;scroll-snap-align:center;font-family:monospace;font-size:19px;font-weight:700;color:var(--sub);transition:all .1s;position:relative;z-index:3;cursor:pointer}
+.drum-item.active{color:var(--green2);font-size:22px}
+.drum-sep{font-size:22px;font-weight:800;color:var(--green);padding-top:10px}
+.hours-pill{background:rgba(0,185,0,.15);color:var(--green2);border-radius:20px;padding:4px 14px;font-size:12px;font-weight:700;margin:0 4px}
+
+/* ── Day type toggle ── */
+.day-toggle{display:flex;gap:8px;margin-bottom:12px}
+.day-type-btn{flex:1;padding:9px 4px;border:none;border-radius:10px;cursor:pointer;font-family:'Noto Sans Thai',sans-serif;font-size:12px;font-weight:700;transition:all .2s;background:var(--card2);color:var(--sub)}
+.day-type-btn.active{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;box-shadow:0 2px 8px rgba(0,185,0,.3)}
+
+/* ── Holiday banner ── */
+.holiday-banner{background:rgba(255,213,79,.1);border:1px solid rgba(255,213,79,.25);border-radius:12px;padding:12px 16px;display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.holiday-banner span{font-size:14px;font-weight:600;color:var(--yellow)}
+
+/* ── Buttons ── */
+.btn{width:100%;padding:13px;border:none;border-radius:12px;font-family:'Noto Sans Thai',sans-serif;font-size:14px;font-weight:800;cursor:pointer;transition:all .15s}
+.btn-green{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;box-shadow:0 3px 10px rgba(0,185,0,.3)}
+.btn-green:active{transform:scale(.98)}
+.btn-red{background:rgba(239,83,80,.15);color:#ef9a9a;border:1px solid rgba(239,83,80,.3)}
+.btn-grey{background:var(--card2);color:var(--sub);border:1px solid var(--border)}
+.btn-sm{padding:6px 12px;font-size:11px;border-radius:8px;width:auto}
+
+/* ── Toast ── */
+#toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 20px;font-size:13px;opacity:0;transition:all .3s;z-index:999;white-space:nowrap;pointer-events:none}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.ok{border-color:rgba(0,185,0,.4);color:#81c784}
+#toast.err{border-color:rgba(239,83,80,.4);color:#ef9a9a}
+
+/* ── Error box ── */
+.err-box{background:rgba(239,83,80,.1);border:1px solid rgba(239,83,80,.3);border-radius:8px;padding:8px 12px;font-size:12px;color:#ef9a9a;margin-bottom:10px;display:none}
+
+/* ── OT Records list ── */
+.ot-row{padding:12px 14px;border-bottom:1px solid var(--border)}
+.ot-row:last-child{border-bottom:none}
+.ot-date-box{width:38px;flex-shrink:0;text-align:center;background:#141829;border-radius:10px;padding:5px 2px}
+.ot-date-dd{font-size:18px;font-weight:800;color:var(--text);line-height:1}
+.ot-date-mm{font-size:9px;color:var(--sub)}
+.ot-date-day{font-size:9px;color:var(--sub)}
+.badge{font-size:10px;padding:2px 8px;border-radius:10px}
+.badge-wday{background:#5c6bc022;color:#9fa8da}
+.badge-hol{background:#c2185b22;color:#f48fb1}
+.badge-pend{background:rgba(255,167,38,.15);color:#ffb74d}
+.badge-ok{background:rgba(0,185,0,.15);color:#81c784}
+.badge-rej{background:rgba(239,83,80,.15);color:#ef9a9a}
+
+/* ── KPI cards ── */
+.kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.kpi{background:var(--card);border-radius:12px;padding:12px 14px;border-left:3px solid}
+.kpi-val{font-size:22px;font-weight:800;margin:2px 0}
+.kpi-label{font-size:10px;color:var(--sub)}
+
+/* ── Chart ── */
+.chart-wrap{overflow-x:auto;padding-bottom:4px}
+.chart-inner{display:flex;align-items:flex-end;gap:6px;min-width:max-content;padding:0 4px 30px}
+.bar-col{display:flex;flex-direction:column;align-items:center;position:relative}
+.bar{border-radius:4px 4px 0 0;min-width:20px;width:20px;transition:height .3s;cursor:pointer}
+.bar-lbl{position:absolute;bottom:-26px;font-size:9px;color:var(--sub);white-space:nowrap}
+
+/* ── Admin tabs ── */
+.sub-tabs{display:flex;gap:6px;margin-bottom:12px}
+.sub-tab{flex:1;padding:7px 4px;background:var(--card2);border:none;border-radius:8px;font-family:'Noto Sans Thai',sans-serif;font-size:11px;color:var(--sub);cursor:pointer;font-weight:600}
+.sub-tab.active{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff}
+
+/* ── Settings form ── */
+.emp-row{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.emp-avatar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0}
+
+/* ── Modal ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;align-items:flex-end;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--card);border-radius:20px 20px 0 0;padding:20px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto}
+.modal-title{font-size:15px;font-weight:800;margin-bottom:16px;color:var(--text)}
+
+/* ── Month selector ── */
+.month-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;scrollbar-width:none}
+.month-row::-webkit-scrollbar{display:none}
+.month-chip{padding:5px 12px;border-radius:20px;border:none;font-family:'Noto Sans Thai',sans-serif;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;background:var(--card2);color:var(--sub)}
+.month-chip.active{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff}
+
+/* ── Loading skeleton ── */
+.skeleton{background:linear-gradient(90deg,var(--card2) 25%,#323850 50%,var(--card2) 75%);background-size:200%;animation:shimmer 1.2s infinite;border-radius:8px;height:20px;margin-bottom:8px}
+@keyframes shimmer{0%{background-position:200%}100%{background-position:-200%}}
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;600;700;800&display=swap');
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div style="font-size:13px;color:var(--sub)">กำลังโหลด...</div>
+</div>
+
+<div id="app" style="display:none">
+  <!-- Top bar -->
+  <div id="topbar">
+    <div class="logo">🟢 OT <span>Adrun</span></div>
+    <div class="user-chip">
+      <div class="user-avatar" id="uAvatar" style="background:#5c6bc0">?</div>
+      <div class="user-name" id="uName">โหลด...</div>
+      <div class="admin-badge" id="adminBadge" style="display:none">ADMIN</div>
+    </div>
+  </div>
+
+  <!-- Tab bar -->
+  <div id="tabbar">
+    <button class="tab active" onclick="showTab('record')" id="tab-record">📋 บันทึก OT</button>
+    <button class="tab" onclick="showTab('myot')" id="tab-myot">📊 OT ของฉัน</button>
+    <button class="tab" onclick="showTab('admin')" id="tab-admin" style="display:none">🔐 Admin</button>
+    <button class="tab" onclick="showTab('settings')" id="tab-settings" style="display:none">⚙️ ตั้งค่า</button>
+  </div>
+
+  <div id="content">
+
+    <!-- ══════════════════ RECORD TAB ══════════════════ -->
+    <div class="section show" id="sec-record">
+
+      <!-- Date picker -->
+      <div class="card">
+        <div class="card-header">📅 วันที่บันทึก OT</div>
+        <div class="card-body" style="padding-bottom:8px">
+          <button class="date-btn" onclick="toggleCal()">
+            <div class="date-val">
+              <span>📅</span>
+              <span id="dateDisplay" style="font-size:14px;font-weight:700">--/--/----</span>
+              <span class="day-badge day-wday" id="dowDisplay">-</span>
+            </div>
+            <span style="color:var(--sub);font-size:12px" id="calArrow">▼</span>
+          </button>
+          <div id="calWrap" style="display:none;margin-top:8px">
+            <div class="cal-wrap">
+              <div class="cal-nav">
+                <button class="cal-nav-btn" onclick="calPrev()">‹</button>
+                <div class="cal-title" id="calTitle">--</div>
+                <button class="cal-nav-btn" onclick="calNext()">›</button>
+              </div>
+              <div class="cal-grid" id="calGrid"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Holiday banner (hidden by default) -->
+      <div class="holiday-banner" id="holidayBanner" style="display:none">
+        <span>🌅</span>
+        <span id="holidayBannerText">วันหยุด — คิดแบบเหมาจ่าย</span>
+      </div>
+
+      <!-- Time picker (weekday only) -->
+      <div class="card" id="timePickerCard">
+        <div class="card-header">⏰ ระบุเวลา OT</div>
+        <div class="card-body">
+          <div class="time-row">
+            <div style="text-align:center">
+              <div class="time-label">เริ่ม OT</div>
+              <div style="display:flex;align-items:center;gap:4px">
+                <div class="drum-wrap"><div class="drum-mask-top"></div><div class="drum-highlight"></div><div class="drum-mask-bot"></div><div class="drum-scroll" id="drumStartH" onscroll="onDrumScroll(this,'startH')"></div></div>
+                <div class="drum-sep">:</div>
+                <div class="drum-wrap"><div class="drum-mask-top"></div><div class="drum-highlight"></div><div class="drum-mask-bot"></div><div class="drum-scroll" id="drumStartM" onscroll="onDrumScroll(this,'startM')"></div></div>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:18px">
+              <span style="font-size:18px;color:var(--sub)">→</span>
+              <div class="hours-pill" id="hoursPill" style="visibility:hidden">0 ชม.</div>
+            </div>
+            <div style="text-align:center">
+              <div class="time-label">สิ้นสุด OT</div>
+              <div style="display:flex;align-items:center;gap:4px">
+                <div class="drum-wrap"><div class="drum-mask-top"></div><div class="drum-highlight"></div><div class="drum-mask-bot"></div><div class="drum-scroll" id="drumEndH" onscroll="onDrumScroll(this,'endH')"></div></div>
+                <div class="drum-sep">:</div>
+                <div class="drum-wrap"><div class="drum-mask-top"></div><div class="drum-highlight"></div><div class="drum-mask-bot"></div><div class="drum-scroll" id="drumEndM" onscroll="onDrumScroll(this,'endM')"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Task + Location -->
+      <div class="card">
+        <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+          <div>
+            <label>📝 งานที่ทำ *</label>
+            <input type="text" id="taskInput" placeholder="เช่น ซ่อมเครื่อง, ประชุม, ทำรายงาน...">
+          </div>
+          <div>
+            <label>📍 สถานที่ (ไม่บังคับ)</label>
+            <input type="text" id="locInput" placeholder="เช่น โรงงาน A, ออฟฟิศ...">
+          </div>
+        </div>
+      </div>
+
+      <div class="err-box" id="recordErr"></div>
+      <button class="btn btn-green" onclick="submitOT()">✅ บันทึก OT</button>
+    </div>
+
+    <!-- ══════════════════ MY OT TAB ══════════════════ -->
+    <div class="section" id="sec-myot">
+      <div class="month-row" id="myMonthRow"></div>
+      <div class="kpi-grid" id="myKpi">
+        <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">วันธรรมดา</div><div class="kpi-val" style="color:#9fa8da" id="kpiH">-</div><div class="kpi-label">ชั่วโมง</div></div>
+        <div class="kpi" style="border-color:#c2185b"><div class="kpi-label">วันหยุด</div><div class="kpi-val" style="color:#f48fb1" id="kpiHol">-</div><div class="kpi-label">วัน</div></div>
+      </div>
+      <div class="card" id="myRecordsCard">
+        <div class="card-header">📋 รายการ OT</div>
+        <div id="myRecordsList"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>
+      </div>
+    </div>
+
+    <!-- ══════════════════ ADMIN TAB ══════════════════ -->
+    <div class="section" id="sec-admin">
+      <div class="sub-tabs">
+        <button class="sub-tab active" onclick="showAdminSub('overview')" id="stab-overview">📊 ภาพรวม</button>
+        <button class="sub-tab" onclick="showAdminSub('chart')" id="stab-chart">📈 กราฟ</button>
+        <button class="sub-tab" onclick="showAdminSub('requests')" id="stab-requests">🔧 แก้ไข</button>
+      </div>
+      <div id="admin-overview"></div>
+      <div id="admin-chart" style="display:none"></div>
+      <div id="admin-requests" style="display:none"></div>
+    </div>
+
+    <!-- ══════════════════ SETTINGS TAB ══════════════════ -->
+    <div class="section" id="sec-settings">
+      <div class="sub-tabs">
+        <button class="sub-tab active" onclick="showSettingsSub('employees')" id="stab-emp">👥 พนักงาน</button>
+        <button class="sub-tab" onclick="showSettingsSub('holidays')" id="stab-hol">🎌 วันหยุด</button>
+      </div>
+      <div id="settings-employees"></div>
+      <div id="settings-holidays" style="display:none"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+  <div class="modal" id="modalBox">
+    <div class="modal-title" id="modalTitle">-</div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════
+const API = "";           // same origin
+let STATE = {
+  liffId: "", userId: "", displayName: "", isAdmin: false,
+  empData: null, holidays: [],
+  selDate: "", selDow: 0,
+  startH: 18, startM: 0, endH: 20, endM: 0,
+  calYear: 0, calMonth: 0,
+  myMonth: "", myYear: "",
+  adminSub: "overview", settingsSub: "employees",
+};
+
+const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+const MONTHS_SHORT= ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+const DAYS_TH     = ["อา","จ","อ","พ","พฤ","ศ","ส"];
+const DAYS_FULL   = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
+const EMP_COLORS  = ["#00d400","#5c6bc0","#ef6c00","#c2185b","#00bcd4","#ffd54f","#ab47bc","#26a69a"];
+
+// ══════════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════════
+async function init() {
+  try {
+    const cfgRes = await fetch("/api/config");
+    const cfg    = await cfgRes.json();
+    STATE.liffId = cfg.liffId;
+
+    await liff.init({ liffId: STATE.liffId });
+
+    if (!liff.isLoggedIn()) { liff.login(); return; }
+
+    const profile       = await liff.getProfile();
+    STATE.userId        = profile.userId;
+    STATE.displayName   = profile.displayName;
+
+    // ดึงข้อมูล me + holidays พร้อมกัน
+    const [meRes, holRes] = await Promise.all([
+      fetch(`/api/me?userId=${STATE.userId}&displayName=${encodeURIComponent(STATE.displayName)}`),
+      fetch("/api/holidays"),
+    ]);
+    const me  = await meRes.json();
+    const hol = await holRes.json();
+
+    STATE.isAdmin  = me.isAdmin;
+    STATE.empData  = me.found ? me : null;
+    STATE.holidays = hol.holidays || [];
+
+    // Top bar
+    const av = document.getElementById("uAvatar");
+    const nm = document.getElementById("uName");
+    av.textContent  = profile.displayName.charAt(0);
+    av.style.background = EMP_COLORS[profile.displayName.charCodeAt(0) % EMP_COLORS.length];
+    nm.textContent  = profile.displayName;
+    if (STATE.isAdmin) {
+      document.getElementById("adminBadge").style.display = "inline";
+      document.getElementById("tab-admin").style.display  = "block";
+      document.getElementById("tab-settings").style.display = "block";
+    }
+
+    // Set today
+    setToday();
+    initDrums();
+
+    document.getElementById("loading").style.display = "none";
+    document.getElementById("app").style.display     = "block";
+
+  } catch (e) {
+    document.getElementById("loading").innerHTML =
+      `<div style="color:#ef9a9a;font-size:13px;text-align:center;padding:20px">เกิดข้อผิดพลาด<br>${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// TABS
+// ══════════════════════════════════════════════════════════════
+function showTab(name) {
+  ["record","myot","admin","settings"].forEach(t => {
+    document.getElementById(`sec-${t}`).classList.toggle("show", t === name);
+    document.getElementById(`tab-${t}`)?.classList.toggle("active", t === name);
+  });
+  if (name === "myot")     loadMyOT();
+  if (name === "admin")    loadAdmin();
+  if (name === "settings") loadSettings();
+}
+
+// ══════════════════════════════════════════════════════════════
+// CALENDAR
+// ══════════════════════════════════════════════════════════════
+function setToday() {
+  const d  = new Date();
+  const dd = String(d.getDate()).padStart(2,"0");
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  const yy = d.getFullYear()+543;
+  selectDate(`${dd}/${mm}/${yy}`, d.getDay());
+  STATE.calYear  = d.getFullYear();
+  STATE.calMonth = d.getMonth();
+  renderCal();
+}
+
+function toggleCal() {
+  const w = document.getElementById("calWrap");
+  const a = document.getElementById("calArrow");
+  const v = w.style.display === "none";
+  w.style.display = v ? "block" : "none";
+  a.textContent   = v ? "▲" : "▼";
+}
+
+function renderCal() {
+  const { calYear: y, calMonth: m } = STATE;
+  document.getElementById("calTitle").textContent = `${MONTHS_SHORT[m]} ${y+543}`;
+  const grid     = document.getElementById("calGrid");
+  const firstDow = new Date(y, m, 1).getDay();
+  const days     = new Date(y, m+1, 0).getDate();
+  const today    = new Date();
+
+  let html = DAYS_TH.map((d,i)=>`<div class="cal-hdr ${i===0?'sun':i===6?'sat':''}">${d}</div>`).join("");
+  for (let i=0;i<firstDow;i++) html += `<div></div>`;
+  for (let d=1;d<=days;d++) {
+    const dt     = new Date(y, m, d);
+    const dd     = String(d).padStart(2,"0");
+    const mm2    = String(m+1).padStart(2,"0");
+    const dateStr= `${dd}/${mm2}/${y+543}`;
+    const isFuture = dt > today;
+    const isTodayD = dt.toDateString()===today.toDateString();
+    const isSel  = dateStr === STATE.selDate;
+    const dow    = dt.getDay();
+    let cls = "cal-day";
+    if (isFuture) cls += " future";
+    else {
+      if (isTodayD) cls += " today";
+      if (isSel)    cls += " selected";
+      if (dow===0)  cls += " sun-day";
+      if (dow===6)  cls += " sat-day";
+    }
+    const click = isFuture ? "" : `onclick="selectDate('${dateStr}',${dow})"`;
+    html += `<div class="${cls}" ${click}>${d}</div>`;
+  }
+  grid.innerHTML = html;
+}
+
+function calPrev() { if(--STATE.calMonth < 0){STATE.calMonth=11;STATE.calYear--} renderCal(); }
+function calNext() { if(++STATE.calMonth > 11){STATE.calMonth=0;STATE.calYear++} renderCal(); }
+
+function selectDate(dateStr, dow) {
+  STATE.selDate = dateStr;
+  STATE.selDow  = dow;
+  document.getElementById("dateDisplay").textContent = dateStr;
+  const db = document.getElementById("dowDisplay");
+  db.textContent = `วัน${DAYS_FULL[dow]}`;
+  db.className   = `day-badge ${dow===0?"day-sun":dow===6?"day-sat":"day-wday"}`;
+
+  // ตรวจวันหยุด
+  const isHolDate = STATE.holidays.some(h => h.date === dateStr);
+  const isHol     = dow === 0 || isHolDate;
+  const tp        = document.getElementById("timePickerCard");
+  const hb        = document.getElementById("holidayBanner");
+  if (isHol) {
+    const hName = isHolDate ? STATE.holidays.find(h=>h.date===dateStr)?.name||"วันหยุดนักขัตฤกษ์" : "วันอาทิตย์";
+    tp.style.display = "none";
+    hb.style.display = "flex";
+    document.getElementById("holidayBannerText").textContent = `🌅 ${hName} — คิดแบบเหมาจ่าย`;
+  } else {
+    tp.style.display = "block";
+    hb.style.display = "none";
+  }
+  renderCal();
+}
+
+// ══════════════════════════════════════════════════════════════
+// DRUMS
+// ══════════════════════════════════════════════════════════════
+const HOURS = Array.from({length:24},(_,i)=>i);
+const MINS  = [0,15,30,45];
+
+function initDrums() {
+  buildDrum("drumStartH", HOURS, STATE.startH, v=>{ STATE.startH=v; updateHours(); });
+  buildDrum("drumStartM", MINS,  STATE.startM, v=>{ STATE.startM=v; updateHours(); }, v=>String(v).padStart(2,"0"));
+  buildDrum("drumEndH",   HOURS, STATE.endH,   v=>{ STATE.endH=v;   updateHours(); });
+  buildDrum("drumEndM",   MINS,  STATE.endM,   v=>{ STATE.endM=v;   updateHours(); }, v=>String(v).padStart(2,"0"));
+  updateHours();
+}
+
+function buildDrum(id, items, initVal, onChange, fmt=v=>String(v).padStart(2,"0")) {
+  const el = document.getElementById(id);
+  el._items    = items;
+  el._onChange = onChange;
+  el._fmt      = fmt;
+  el.innerHTML = `<div style="height:40px"></div>` +
+    items.map(v=>`<div class="drum-item ${v===initVal?'active':''}" style="height:40px">${fmt(v)}</div>`).join("") +
+    `<div style="height:40px"></div>`;
+  const idx = items.indexOf(initVal);
+  setTimeout(()=>{ el.scrollTop = idx*40; }, 50);
+}
+
+function onDrumScroll(el, key) {
+  clearTimeout(el._t);
+  el._t = setTimeout(()=>{
+    const idx     = Math.round(el.scrollTop/40);
+    const clamped = Math.max(0, Math.min(el._items.length-1, idx));
+    el.scrollTop  = clamped*40;
+    const val = el._items[clamped];
+    el.querySelectorAll(".drum-item").forEach((d,i)=>d.classList.toggle("active", i===clamped));
+    el._onChange(val);
+    STATE[key] = val;
+  }, 80);
+}
+
+function updateHours() {
+  const mins = STATE.endH*60+STATE.endM - STATE.startH*60-STATE.startM;
+  const h    = mins>0 ? +(mins/60).toFixed(2) : 0;
+  const pill = document.getElementById("hoursPill");
+  pill.style.visibility = h>0?"visible":"hidden";
+  pill.textContent = `${h} ชม.`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// SUBMIT OT
+// ══════════════════════════════════════════════════════════════
+async function submitOT() {
+  const errBox = document.getElementById("recordErr");
+  errBox.style.display = "none";
+
+  if (!STATE.selDate)  return showErr(errBox, "กรุณาเลือกวันที่");
+  const task = document.getElementById("taskInput").value.trim();
+  if (!task)           return showErr(errBox, "กรุณาระบุงานที่ทำ");
+  const loc  = document.getElementById("locInput").value.trim();
+
+  const dow       = STATE.selDow;
+  const isHolDate = STATE.holidays.some(h => h.date === STATE.selDate);
+  const isHol     = dow === 0 || isHolDate;
+  const startTime = isHol ? "-" : `${String(STATE.startH).padStart(2,"0")}:${String(STATE.startM).padStart(2,"0")}`;
+  const endTime   = isHol ? "-" : `${String(STATE.endH).padStart(2,"0")}:${String(STATE.endM).padStart(2,"0")}`;
+
+  const btn = document.querySelector("#sec-record .btn-green");
+  btn.textContent = "กำลังบันทึก...";
+  btn.disabled = true;
+
+  try {
+    const res  = await fetch("/api/ot", {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        name: STATE.displayName, date: STATE.selDate,
+        startTime, endTime, task, location: loc,
+        otType: isHol ? "holiday" : "weekday",
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return showErr(errBox, data.error || "เกิดข้อผิดพลาด");
+
+    toast("✅ บันทึก OT สำเร็จ!", "ok");
+    document.getElementById("taskInput").value = "";
+    document.getElementById("locInput").value  = "";
+    setToday();
+  } catch (e) {
+    showErr(errBox, "เชื่อมต่อไม่ได้ กรุณาลองใหม่");
+  } finally {
+    btn.textContent = "✅ บันทึก OT";
+    btn.disabled = false;
+  }
+}
+
+function showErr(el, msg) { el.textContent="⚠️ "+msg; el.style.display="block"; }
+
+// ══════════════════════════════════════════════════════════════
+// MY OT
+// ══════════════════════════════════════════════════════════════
+async function loadMyOT() {
+  if (!STATE.myMonth) {
+    const d  = new Date();
+    STATE.myMonth = String(d.getMonth()+1).padStart(2,"0");
+    STATE.myYear  = String(d.getFullYear()+543);
+  }
+
+  const res  = await fetch(`/api/records?name=${encodeURIComponent(STATE.displayName)}&month=${STATE.myMonth}&year=${STATE.myYear}`);
+  const data = await res.json();
+  renderMyOT(data.records || []);
+  renderMyMonthRow(data.records || []);
+}
+
+function renderMyMonthRow(records) {
+  // สร้าง list 6 เดือนย้อนหลัง
+  const chips = [];
+  const d = new Date();
+  for (let i=5;i>=0;i--) {
+    const m2 = new Date(d.getFullYear(), d.getMonth()-i, 1);
+    const mm = String(m2.getMonth()+1).padStart(2,"0");
+    const yy = String(m2.getFullYear()+543);
+    const active = mm===STATE.myMonth && yy===STATE.myYear;
+    chips.push(`<button class="month-chip ${active?'active':''}" onclick="changeMyMonth('${mm}','${yy}')">${MONTHS_SHORT[m2.getMonth()]} ${yy}</button>`);
+  }
+  document.getElementById("myMonthRow").innerHTML = chips.join("");
+}
+
+async function changeMyMonth(mm, yy) {
+  STATE.myMonth = mm; STATE.myYear = yy;
+  document.getElementById("myRecordsList").innerHTML = `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div>`;
+  document.getElementById("kpiH").textContent   = "-";
+  document.getElementById("kpiHol").textContent = "-";
+  await loadMyOT();
+}
+
+function renderMyOT(records) {
+  const h   = records.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+  const hol = records.filter(r=>r.otType!=="วันธรรมดา").length;
+  document.getElementById("kpiH").textContent   = h;
+  document.getElementById("kpiHol").textContent = hol;
+
+  if (!records.length) {
+    document.getElementById("myRecordsList").innerHTML = `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีรายการ OT เดือนนี้</div>`;
+    return;
+  }
+
+  const html = records.slice().reverse().map(r => {
+    const [dd,mm] = r.date.split("/");
+    const isWday = r.otType === "วันธรรมดา";
+    const pendingReq = false; // will be checked separately if needed
+    return `
+    <div class="ot-row">
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <div class="ot-date-box">
+          <div class="ot-date-day">${r.date.split("/")[0]?DAYS_TH[new Date(Number(r.date.split("/")[2])-543,Number(mm)-1,Number(dd)).getDay()]||"":""}</div>
+          <div class="ot-date-dd">${dd}</div>
+          <div class="ot-date-mm">/${mm}</div>
+        </div>
+        <div style="flex:1">
+          <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;flex-wrap:wrap">
+            <span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:r.otType}</span>
+          </div>
+          ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${r.task}${r.location?" · 📍"+r.location:""}</div>`:""}
+        </div>
+        <button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${r.startTime}–${r.endTime} ${r.task}')">🔧</button>
+      </div>
+    </div>`;
+  }).join("");
+  document.getElementById("myRecordsList").innerHTML = html;
+}
+
+function openEditRequest(idx, date, desc) {
+  openModal("ขอแก้ไข OT", `
+    <div style="font-size:13px;color:var(--sub);margin-bottom:12px">วันที่ ${date}: ${desc}</div>
+    <div><label>แจ้งรายละเอียดที่ต้องการแก้ไข</label>
+    <textarea id="editNote" placeholder="เช่น เวลาสิ้นสุดผิด ควรเป็น 21:30..."></textarea></div>
+    <div style="height:10px"></div>
+    <button class="btn btn-green" onclick="submitEditRequest(${idx},'${date}','${desc}')">📩 ส่งคำขอ</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
+  `);
+}
+
+async function submitEditRequest(idx, date, desc) {
+  const note = document.getElementById("editNote").value.trim();
+  if (!note) return toast("กรุณาระบุรายละเอียด", "err");
+  await fetch("/api/edit-request", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ name:STATE.displayName, date, recordDesc:desc, note }),
+  });
+  closeModal();
+  toast("✅ ส่งคำขอถึง Admin แล้ว","ok");
+}
+
+// ══════════════════════════════════════════════════════════════
+// ADMIN
+// ══════════════════════════════════════════════════════════════
+let adminRecords = [], adminEmployees = [], adminRequests = [];
+
+async function loadAdmin() {
+  const d  = new Date();
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  const yy = String(d.getFullYear()+543);
+
+  const [recRes, empRes, reqRes] = await Promise.all([
+    fetch(`/api/admin/records?month=${mm}&year=${yy}`),
+    fetch("/api/employees"),
+    fetch("/api/edit-requests"),
+  ]);
+  const recData = await recRes.json();
+  const empData = await empRes.json();
+  const reqData = await reqRes.json();
+
+  adminRecords   = recData.records || [];
+  adminEmployees = empData.employees || [];
+  adminRequests  = reqData.requests || [];
+
+  showAdminSub(STATE.adminSub);
+}
+
+function showAdminSub(sub) {
+  STATE.adminSub = sub;
+  ["overview","chart","requests"].forEach(s => {
+    document.getElementById(`admin-${s}`).style.display = s===sub?"block":"none";
+    document.getElementById(`stab-${s}`).classList.toggle("active", s===sub);
+  });
+  if (sub==="overview") renderAdminOverview();
+  if (sub==="chart")    renderAdminChart();
+  if (sub==="requests") renderAdminRequests();
+}
+
+function renderAdminOverview() {
+  const totalH   = adminRecords.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+  const totalPay = adminRecords.reduce((s,r)=>s+r.pay,0);
+  const byEmp    = adminEmployees.map(e=>{
+    const recs  = adminRecords.filter(r=>r.name===e.name);
+    const h     = recs.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+    const pay   = recs.reduce((s,r)=>s+r.pay,0);
+    return {...e, h, pay, count:recs.length};
+  }).filter(e=>e.count>0);
+
+  document.getElementById("admin-overview").innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">OT วันธรรมดา</div><div class="kpi-val" style="color:#9fa8da">${totalH}</div><div class="kpi-label">ชม.</div></div>
+      <div class="kpi" style="border-color:#00b900"><div class="kpi-label">ค่า OT รวม</div><div class="kpi-val" style="color:#81c784">${totalPay.toLocaleString()}</div><div class="kpi-label">บาท</div></div>
+    </div>
+    <div class="card">
+      <div class="card-header">📊 OT แยกตามพนักงาน</div>
+      ${byEmp.map((e,i)=>`
+      <div style="padding:10px 14px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+          <span style="font-size:13px">${e.name}</span>
+          <span style="font-size:12px;color:#81c784;font-weight:700">${e.pay.toLocaleString()} ฿</span>
+        </div>
+        <div style="height:5px;background:rgba(255,255,255,.05);border-radius:3px">
+          <div style="height:100%;width:${totalPay>0?Math.min((e.pay/totalPay)*100,100):0}%;background:linear-gradient(90deg,var(--green),var(--green2));border-radius:3px"></div>
+        </div>
+        <div style="font-size:10px;color:var(--sub);margin-top:3px">${e.h} ชม. · ${e.count} รายการ</div>
+      </div>`).join("")}
+    </div>
+  `;
+}
+
+function renderAdminChart() {
+  const dates = [...new Set(adminRecords.map(r=>r.date))].sort((a,b)=>{
+    const [da,ma,ya]=a.split("/"); const [db,mb,yb]=b.split("/");
+    return new Date(+ya-543,+ma-1,+da)-new Date(+yb-543,+mb-1,+db);
+  });
+  const maxH = Math.max(5, ...dates.map(d=>adminRecords.filter(r=>r.date===d&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0)));
+  const CH = 120;
+
+  const bars = dates.map(date=>{
+    const [dd,mm,yy]=date.split("/");
+    const dow = new Date(+yy-543,+mm-1,+dd).getDay();
+    const h   = adminRecords.filter(r=>r.date===date&&r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+    const hol = adminRecords.filter(r=>r.date===date&&r.otType!=="วันธรรมดา").length;
+    const bH  = Math.max(h>0?4:0,(h/maxH)*CH);
+    const holH= hol>0?12:0;
+    const col = dow===0?"#ef9a9a":dow===6?"#90caf9":"var(--sub)";
+    return `
+    <div class="bar-col">
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:${CH}px">
+        ${holH?`<div class="bar" style="height:${holH}px;background:#ffd54f;opacity:.8"></div>`:""}
+        <div class="bar" style="height:${bH}px;background:var(--green);opacity:.85" title="${date}: ${h}ชม."></div>
+      </div>
+      <div class="bar-lbl" style="color:${col}">${DAYS_TH[dow]}<br>${dd}/${mm}</div>
+    </div>`;
+  }).join("");
+
+  document.getElementById("admin-chart").innerHTML = `
+    <div class="card">
+      <div class="card-header">📈 OT รายวัน (เดือนนี้)</div>
+      <div class="card-body">
+        ${dates.length?`<div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`
+          :`<div style="text-align:center;color:var(--sub);font-size:13px;padding:20px">ไม่มีข้อมูล</div>`}
+      </div>
+    </div>`;
+}
+
+function renderAdminRequests() {
+  const html = adminRequests.length ? adminRequests.slice().reverse().map((r,i)=>{
+    const sc = r.status==="รอดำเนินการ"?"badge-pend":r.status==="อนุมัติแล้ว"?"badge-ok":"badge-rej";
+    return `
+    <div class="card" style="margin-bottom:10px">
+      <div style="padding:12px 14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:13px;font-weight:700">${r.name} · ${r.date}</div>
+          <span class="badge ${sc}">${r.status}</span>
+        </div>
+        <div style="font-size:11px;color:var(--sub);background:#141829;border-radius:8px;padding:6px 10px;margin-bottom:8px">${r.recordDesc}</div>
+        <div style="font-size:12px;color:#ffe082;background:rgba(255,167,38,.08);border-radius:8px;padding:6px 10px;border:1px solid rgba(255,167,38,.15)">💬 "${r.note}"</div>
+        ${r.status==="รอดำเนินการ"?`
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-red btn-sm" style="flex:1" onclick="handleRequest(${r.idx},'ปฏิเสธแล้ว')">❌ ปฏิเสธ</button>
+          <button class="btn btn-green btn-sm" style="flex:1" onclick="handleRequest(${r.idx},'อนุมัติแล้ว')">✅ อนุมัติ</button>
+        </div>`:""}
+      </div>
+    </div>`;
+  }).join("") : `<div style="text-align:center;color:var(--sub);font-size:13px;padding:30px">ไม่มีคำขอแก้ไข</div>`;
+  document.getElementById("admin-requests").innerHTML = html;
+}
+
+async function handleRequest(idx, status) {
+  await fetch(`/api/edit-requests/${idx}`, {
+    method:"PUT", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ status }),
+  });
+  toast(status==="อนุมัติแล้ว"?"✅ อนุมัติแล้ว":"❌ ปฏิเสธแล้ว", status==="อนุมัติแล้ว"?"ok":"err");
+  await loadAdmin();
+}
+
+// ══════════════════════════════════════════════════════════════
+// SETTINGS
+// ══════════════════════════════════════════════════════════════
+let settingsEmps = [], settingsHols = [];
+
+async function loadSettings() {
+  const [empRes, holRes] = await Promise.all([fetch("/api/employees"), fetch("/api/holidays")]);
+  settingsEmps = (await empRes.json()).employees || [];
+  settingsHols = (await holRes.json()).holidays || [];
+  showSettingsSub(STATE.settingsSub);
+}
+
+function showSettingsSub(sub) {
+  STATE.settingsSub = sub;
+  document.getElementById("settings-employees").style.display = sub==="employees"?"block":"none";
+  document.getElementById("settings-holidays").style.display  = sub==="holidays"?"block":"none";
+  document.getElementById("stab-emp").classList.toggle("active", sub==="employees");
+  document.getElementById("stab-hol").classList.toggle("active", sub==="holidays");
+  if (sub==="employees") renderSettingsEmps();
+  if (sub==="holidays")  renderSettingsHols();
+}
+
+function renderSettingsEmps() {
+  const rows = settingsEmps.map((e,i)=>`
+    <div class="emp-row">
+      <div class="emp-avatar" style="background:${EMP_COLORS[e.name.charCodeAt(0)%EMP_COLORS.length]}">${e.name.charAt(0)}</div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:600">${e.name}</div>
+        <div style="font-size:10px;color:var(--sub)">${e.hourlyRate}฿/ชม. · หยุดเหมา${e.holidayFlat.toLocaleString()}฿</div>
+      </div>
+      <button class="btn btn-grey btn-sm" onclick="openEmpEdit(${i})">✏️</button>
+      <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteEmp(${i})">🗑️</button>
+    </div>`).join("");
+
+  document.getElementById("settings-employees").innerHTML = `
+    <div style="margin-bottom:10px;text-align:right">
+      <button class="btn btn-green btn-sm" onclick="openEmpAdd()">➕ เพิ่มพนักงาน</button>
+    </div>
+    <div class="card">${rows||'<div style="padding:20px;text-align:center;color:var(--sub)">ยังไม่มีพนักงาน</div>'}</div>`;
+}
+
+function openEmpAdd() {
+  openModal("➕ เพิ่มพนักงาน", `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div><label>ชื่อ-นามสกุล (ตรงกับชื่อ LINE)</label><input id="eN" placeholder="เช่น สมชาย ใจดี"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div><label>ค่าจ้าง/ชม. (฿)</label><input id="eH" type="number" value="80"></div>
+        <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="500"></div>
+      </div>
+    </div>
+    <div style="height:12px"></div>
+    <button class="btn btn-green" onclick="saveEmpAdd()">✅ เพิ่ม</button>
+  `);
+}
+
+async function saveEmpAdd() {
+  const n=document.getElementById("eN").value.trim();
+  const h=Number(document.getElementById("eH").value);
+  const f=Number(document.getElementById("eF").value);
+  if (!n) return toast("กรุณากรอกชื่อ","err");
+  await fetch("/api/employees",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f})});
+  closeModal(); toast("✅ เพิ่มพนักงานแล้ว","ok");
+  await loadSettings();
+}
+
+function openEmpEdit(i) {
+  const e = settingsEmps[i];
+  openModal("✏️ แก้ไขพนักงาน", `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div><label>ชื่อ-นามสกุล</label><input id="eN" value="${e.name}"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div><label>ค่าจ้าง/ชม. (฿)</label><input id="eH" type="number" value="${e.hourlyRate}"></div>
+        <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="${e.holidayFlat}"></div>
+      </div>
+    </div>
+    <div style="height:12px"></div>
+    <button class="btn btn-green" onclick="saveEmpEdit(${i})">✅ บันทึก</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
+  `);
+}
+
+async function saveEmpEdit(i) {
+  const n=document.getElementById("eN").value.trim();
+  const h=Number(document.getElementById("eH").value);
+  const f=Number(document.getElementById("eF").value);
+  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f})});
+  closeModal(); toast("✅ บันทึกแล้ว","ok"); await loadSettings();
+}
+
+async function deleteEmp(i) {
+  if (!confirm(`ลบ "${settingsEmps[i].name}" ออกใช่ไหม?`)) return;
+  // mark name blank to effectively remove (or implement delete endpoint)
+  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"_DELETED_",hourlyRate:0,holidayFlat:0})});
+  toast("🗑️ ลบแล้ว","ok"); await loadSettings();
+}
+
+function renderSettingsHols() {
+  const byYear = {};
+  settingsHols.forEach(h=>{ const y=h.date.split("/")[2]||"2568"; (byYear[y]=byYear[y]||[]).push(h); });
+  const years = Object.keys(byYear).sort().reverse();
+  const html = years.map(y=>`
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-header">📅 พ.ศ. ${y} (${byYear[y].length} วัน)</div>
+      ${byYear[y].sort((a,b)=>a.date.localeCompare(b.date)).map(h=>`
+      <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600">${h.name}</div>
+          <div style="font-size:11px;color:var(--sub)">${h.date}</div>
+        </div>
+      </div>`).join("")}
+    </div>`).join("");
+
+  document.getElementById("settings-holidays").innerHTML = `
+    <div style="margin-bottom:10px;text-align:right">
+      <button class="btn btn-green btn-sm" onclick="openHolAdd()">➕ เพิ่มวันหยุด</button>
+    </div>
+    ${html||'<div style="text-align:center;color:var(--sub);padding:30px">ยังไม่มีวันหยุด</div>'}`;
+}
+
+function openHolAdd() {
+  openModal("🎌 เพิ่มวันหยุดใหม่", `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div><label>วันที่ (dd/mm/yyyy พ.ศ.)</label><input id="hD" placeholder="เช่น 01/01/2569"></div>
+      <div><label>ชื่อวันหยุด</label><input id="hN" placeholder="เช่น วันขึ้นปีใหม่"></div>
+    </div>
+    <div style="height:12px"></div>
+    <button class="btn btn-green" onclick="saveHolAdd()">✅ เพิ่ม</button>
+  `);
+}
+
+async function saveHolAdd() {
+  const d=document.getElementById("hD").value.trim();
+  const n=document.getElementById("hN").value.trim();
+  if (!d||!n) return toast("กรุณากรอกข้อมูลให้ครบ","err");
+  await fetch("/api/holidays",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({date:d,name:n})});
+  closeModal(); toast("✅ เพิ่มวันหยุดแล้ว","ok"); await loadSettings();
+  STATE.holidays = settingsHols; // refresh local
+}
+
+// ══════════════════════════════════════════════════════════════
+// MODAL + TOAST
+// ══════════════════════════════════════════════════════════════
+function openModal(title, bodyHtml) {
+  document.getElementById("modalTitle").textContent = title;
+  document.getElementById("modalBody").innerHTML    = bodyHtml;
+  document.getElementById("modalOverlay").classList.add("show");
+}
+function closeModal(e) {
+  if (e && e.target !== document.getElementById("modalOverlay")) return;
+  document.getElementById("modalOverlay").classList.remove("show");
+}
+
+let _toastTimer;
+function toast(msg, type="ok") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className   = `show ${type}`;
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>{ t.className=""; }, 2800);
+}
+
+// ══════════════════════════════════════════════════════════════
+// START
+// ══════════════════════════════════════════════════════════════
+init();
+</script>
+</body>
+</html>
