@@ -66,12 +66,24 @@ textarea{resize:none;height:70px}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
 .cal-hdr{text-align:center;font-size:9px;padding:3px 0;color:var(--sub)}
 .cal-hdr.sun{color:#ef9a9a}.cal-hdr.sat{color:#90caf9}
-.cal-day{height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;font-size:12px;cursor:pointer;transition:all .1s;border:1px solid transparent}
+.cal-day{height:34px;display:flex;align-items:center;justify-content:center;border-radius:8px;font-size:12px;cursor:pointer;transition:all .1s;border:1px solid transparent;position:relative}
 .cal-day:empty,.cal-day.empty{cursor:default}
 .cal-day.future{color:rgba(255,255,255,.15);cursor:not-allowed}
 .cal-day.today:not(.selected){border-color:rgba(0,185,0,.4);color:var(--green)}
 .cal-day.selected{background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;font-weight:800}
 .cal-day.sun-day{color:#ef9a9a}.cal-day.sat-day{color:#90caf9}
+/* ★ v1.7: highlight วันหยุดนักขัตฤกษ์ + dot indicator วันเหมาจ่าย */
+.cal-day.holiday-day{background:rgba(255,213,79,.10);color:#ffd54f}
+.cal-day.holiday-day:not(.selected)::after,
+.cal-day.sun-day:not(.selected):not(.future)::after{
+  content:'';position:absolute;width:4px;height:4px;border-radius:50%;
+  bottom:2px;left:50%;transform:translateX(-50%);
+}
+.cal-day.holiday-day:not(.selected)::after{background:#ffd54f}
+.cal-day.sun-day:not(.selected):not(.future)::after{background:#ef9a9a}
+.cal-legend{display:flex;gap:12px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:10px;color:var(--sub);justify-content:center;flex-wrap:wrap}
+.cal-legend-item{display:flex;align-items:center;gap:4px}
+.cal-legend-dot{width:6px;height:6px;border-radius:50%}
 
 /* ── Time drum ── */
 .time-picker{background:var(--card);border-radius:14px;padding:12px;border:1px solid var(--border)}
@@ -225,6 +237,7 @@ textarea{resize:none;height:70px}
                 <button class="cal-nav-btn" onclick="calNext()">›</button>
               </div>
               <div class="cal-grid" id="calGrid"></div>
+              <div class="cal-legend" id="calLegend"></div>
             </div>
           </div>
         </div>
@@ -238,7 +251,7 @@ textarea{resize:none;height:70px}
 
       <!-- Time picker (weekday only) -->
       <div class="card" id="timePickerCard">
-        <div class="card-header">⏰ ระบุเวลา OT</div>
+        <div class="card-header">⏰ ระบุเวลา OT <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 หมุนเลข 23→00 = ข้ามวัน</span></div>
         <div class="card-body">
           <div class="time-row">
             <div style="text-align:center">
@@ -353,6 +366,28 @@ const DAYS_TH     = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 const DAYS_FULL   = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
 const EMP_COLORS  = ["#00d400","#5c6bc0","#ef6c00","#c2185b","#00bcd4","#ffd54f","#ab47bc","#26a69a"];
 const WEEKDAY_MULT = 1.5;
+
+// ★ v1.3+v1.4: เวลางานปกติ จันทร์–เสาร์ 08:30–17:30 (ห้ามลง OT ทับ) + รองรับข้ามวัน
+const WORK_START_MIN = 8 * 60 + 30;   // 510
+const WORK_END_MIN   = 17 * 60 + 30;  // 1050
+function overlapsWorkHours(sh, sm, eh, em) {
+  let s = sh * 60 + sm, e = eh * 60 + em;
+  if (e < s) e += 24 * 60; // ข้ามวัน
+  const day1 = s < WORK_END_MIN          && e > WORK_START_MIN;
+  const day2 = s < WORK_END_MIN + 1440   && e > WORK_START_MIN + 1440;
+  return day1 || day2;
+}
+
+// ★ v1.5: OT day = 06:00 ถึง 06:00 ของวันถัดไป
+const OT_DAY_START_MIN = 6 * 60;                     // 360
+const OT_DAY_END_MIN   = OT_DAY_START_MIN + 1440;    // 1800
+function validateOTWindow(sh, sm, eh, em) {
+  let s = sh * 60 + sm, e = eh * 60 + em;
+  if (e < s) e += 24 * 60;
+  if (s < OT_DAY_START_MIN) return "เวลาเริ่ม OT ต้องไม่ก่อน 06:00";
+  if (e > OT_DAY_END_MIN)   return "OT ต้องสิ้นสุดไม่เกิน 06:00 ของวันถัดไป";
+  return null;
+}
 
 // ══════════════════════════════════════════════════════════════
 // INIT
@@ -471,6 +506,8 @@ function renderCal() {
     const isTodayD = dt.toDateString()===today.toDateString();
     const isSel  = dateStr === STATE.selDate;
     const dow    = dt.getDay();
+    // ★ v1.7: เช็ควันหยุดนักขัตฤกษ์
+    const holiday = STATE.holidays.find(h => h.date === dateStr);
     let cls = "cal-day";
     if (isFuture) cls += " future";
     else {
@@ -478,11 +515,23 @@ function renderCal() {
       if (isSel)    cls += " selected";
       if (dow===0)  cls += " sun-day";
       if (dow===6)  cls += " sat-day";
+      if (holiday)  cls += " holiday-day";
     }
     const click = isFuture ? "" : `onclick="selectDate('${dateStr}',${dow})"`;
-    html += `<div class="${cls}" ${click}>${d}</div>`;
+    const titleAttr = holiday ? `title="${holiday.name} (เหมาจ่าย)"` : (dow===0 ? `title="วันอาทิตย์ (เหมาจ่าย)"` : "");
+    html += `<div class="${cls}" ${click} ${titleAttr}>${d}</div>`;
   }
   grid.innerHTML = html;
+
+  // ★ v1.7: legend อธิบาย dot indicator
+  const legendEl = document.getElementById("calLegend");
+  if (legendEl) {
+    legendEl.innerHTML = `
+      <div class="cal-legend-item"><span class="cal-legend-dot" style="background:#ef9a9a"></span>อาทิตย์</div>
+      <div class="cal-legend-item"><span class="cal-legend-dot" style="background:#ffd54f"></span>วันหยุดนักขัตฤกษ์</div>
+      <div style="opacity:.7">= เหมาจ่าย OT 🌅</div>
+    `;
+  }
 }
 
 function calPrev() { if(--STATE.calMonth < 0){STATE.calMonth=11;STATE.calYear--} renderCal(); }
@@ -553,11 +602,34 @@ function onDrumScroll(el, key) {
 }
 
 function updateHours() {
-  const mins = STATE.endH*60+STATE.endM - STATE.startH*60-STATE.startM;
-  const h    = mins>0 ? +(mins/60).toFixed(2) : 0;
+  let mins = STATE.endH*60+STATE.endM - STATE.startH*60-STATE.startM;
+  // ★ v1.4: ข้ามวัน → +24 ชม.
+  const crossDay = mins < 0;
+  if (crossDay) mins += 24 * 60;
+  const h = mins>0 ? +(mins/60).toFixed(2) : 0;
+
   const pill = document.getElementById("hoursPill");
   pill.style.visibility = h>0?"visible":"hidden";
-  pill.textContent = `${h} ชม.`;
+
+  // ★ v1.6: เช็คเฉพาะทับเวลางานปกติ — ลงเวลาได้ทุกช่วง รวมเช้ามืด
+  const overlap = h>0 && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM);
+  if (overlap) {
+    pill.innerHTML = `⚠️ ทับเวลางาน`;
+    pill.style.background = "rgba(239,83,80,.15)";
+    pill.style.color = "#ef9a9a";
+    return;
+  }
+  const crossLabel = crossDay ? `<span style="font-size:9px;opacity:.7"> ข้ามวัน</span>` : "";
+
+  if (h > 5) {
+    pill.innerHTML = `${h} ชม.${crossLabel} <span style="font-size:9px;opacity:.8">(คิด 5)</span>`;
+    pill.style.background = "rgba(255,167,38,.15)";
+    pill.style.color = "#ffb74d";
+  } else {
+    pill.innerHTML = `${h} ชม.${crossLabel}`;
+    pill.style.background = "rgba(0,185,0,.15)";
+    pill.style.color = "var(--green2)";
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -579,6 +651,11 @@ async function submitOT() {
   const startTime = isHol ? "-" : `${String(STATE.startH).padStart(2,"0")}:${String(STATE.startM).padStart(2,"0")}`;
   const endTime   = isHol ? "-" : `${String(STATE.endH).padStart(2,"0")}:${String(STATE.endM).padStart(2,"0")}`;
 
+  // ★ v1.6: validate ทับเวลางานปกติก่อนส่ง (กัน round-trip server)
+  if (!isHol && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM)) {
+    return showErr(errBox, "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้");
+  }
+
   const btn = document.querySelector("#sec-record .btn-green");
   btn.textContent = "กำลังบันทึก...";
   btn.disabled = true;
@@ -595,7 +672,14 @@ async function submitOT() {
     const data = await res.json();
     if (!res.ok) return showErr(errBox, data.error || "เกิดข้อผิดพลาด");
 
-    toast("✅ บันทึก OT สำเร็จ!", "ok");
+    // ★ v1.2: ถ้าโดน cap → แจ้งให้ user รู้
+    let msg = "✅ บันทึก OT สำเร็จ!";
+    if (data.capped) {
+      msg = `✅ บันทึกแล้ว · ทำ ${data.hours}ชม. คิดเงิน ${data.payableHours}ชม. (${data.pay}฿)`;
+    } else if (data.pay) {
+      msg = `✅ บันทึก OT สำเร็จ! (${data.pay}฿)`;
+    }
+    toast(msg, "ok");
     document.getElementById("taskInput").value = "";
     document.getElementById("locInput").value  = "";
     setToday();
