@@ -33,7 +33,11 @@ const MAX_OT_PER_DAY     = 5;    // ชม. สูงสุดต่อวัน
 const WEEKDAY_MULTIPLIER = 1.5;  // คูณค่าแรงวันธรรมดา
 
 // ── Webhook endpoint ─────────────────────────────────────────
-app.post("/webhook", line.middleware(lineConfig), async (req, res) => {
+app.post("/webhook", (req, res, next) => {
+  const sig = req.headers["x-line-signature"];
+  if (!sig) return res.json({ status: "ok" });
+  next();
+}, line.middleware(lineConfig), async (req, res) => {
   res.json({ status: "ok" }); // ตอบ LINE ก่อนเสมอ
   await Promise.all(req.body.events.map(handleEvent));
 });
