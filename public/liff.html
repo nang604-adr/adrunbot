@@ -1757,11 +1757,11 @@ async function commitPayroll() {
     const data = await res.json();
     if (!res.ok) return toast(data.error || "บันทึกไม่สำเร็จ", "err");
 
-    // ★ v1.16: ถ้า LIFF mobile → server-side download
+    // ★ v1.16.1: ถ้า LIFF mobile → server-side download + fallback modal
     if (isLiffMobile()) {
       const url = `${location.origin}/api/export/payroll/${encodeURIComponent(data.payId)}`;
-      openExternal(url);
-      toast(`✅ บันทึก ${data.records} รายการ — เปิดในเบราว์เซอร์เพื่อดาวน์โหลด`, "ok");
+      openExternalOrShowLink(url, `📥 ดาวน์โหลด Payroll ${data.payId}`);
+      toast(`✅ บันทึก ${data.records} รายการ`, "ok");
     } else {
       generatePayrollExcel(payrollPreview, data.payId, data.committedAt, adminName);
       toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
@@ -1851,6 +1851,64 @@ function openExternal(url) {
   } else {
     window.open(url, "_blank");
   }
+}
+
+// ★ v1.16.1: ลอง 3 วิธีเปิด URL — fallback ไป modal ถ้าไม่ได้
+function openExternalOrShowLink(url, title) {
+  // Method 1: liff.openWindow with external:true
+  try {
+    if (window.liff && liff.openWindow && liff.isInClient && liff.isInClient()) {
+      liff.openWindow({ url, external: true });
+      toast("📥 เปิดในเบราว์เซอร์เพื่อดาวน์โหลด...", "ok");
+      // Show fallback modal after 1.5s in case openWindow fails silently
+      setTimeout(() => showDownloadLinkModal(url, title), 1500);
+      return;
+    }
+  } catch (e) { console.error("liff.openWindow:", e); }
+  // Method 2: window.open
+  try {
+    const w = window.open(url, "_blank");
+    if (w) {
+      toast("📥 เปิดในเบราว์เซอร์...", "ok");
+      return;
+    }
+  } catch (e) { console.error("window.open:", e); }
+  // Method 3: modal with link
+  showDownloadLinkModal(url, title);
+}
+
+function showDownloadLinkModal(url, title) {
+  openModal(title || "📥 ดาวน์โหลดไฟล์ Excel", `
+    <div style="font-size:12px;color:var(--sub);line-height:1.7;margin-bottom:14px">
+      💡 ดาวน์โหลดได้ 2 วิธี:<br>
+      <b>1.</b> แตะลิงก์ด้านล่าง → กด <b>"เปิดใน Safari"</b><br>
+      <b>2.</b> หรือ <b>คัดลอกลิงก์</b> → paste ใน Safari/Chrome
+    </div>
+    <a href="${url}" target="_blank" rel="noopener" style="display:block;padding:12px;background:#141829;border-radius:10px;font-size:11px;color:#81c784;word-break:break-all;text-decoration:none;margin-bottom:10px;border:1px solid rgba(0,185,0,.25)">${url}</a>
+    <button class="btn btn-green btn-sm" style="width:100%" onclick="copyToClipboard('${url.replace(/'/g,"\\'")}');">📋 คัดลอกลิงก์</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-grey btn-sm" style="width:100%" onclick="closeModal()">ปิด</button>
+  `);
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast("✅ คัดลอกแล้ว — paste ใน Safari/Chrome", "ok"))
+      .catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed"; ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); toast("✅ คัดลอกแล้ว", "ok"); }
+  catch (e) { toast("คัดลอกไม่ได้ — กดค้างที่ลิงก์เพื่อ copy", "err"); }
+  document.body.removeChild(ta);
 }
 
 // ★ v1.15.3: Robust download with fallback
@@ -1948,14 +2006,13 @@ function generatePayrollExcel(preview, payId, committedAt, adminName) {
 
 // ── Monthly Export (Option C) ─────────────────────────────
 function exportMonthlyExcel(employeeFilter) {
-  // ★ v1.16: ถ้าอยู่ใน LIFF mobile → ใช้ server-side endpoint + เปิดใน browser ภายนอก
+  // ★ v1.16.1: ถ้าอยู่ใน LIFF mobile → ใช้ server-side endpoint + fallback modal
   if (isLiffMobile()) {
     const d = new Date();
     const mm = String(d.getMonth()+1).padStart(2,"0");
     const yy = String(d.getFullYear()+543);
     const url = `${location.origin}/api/export/monthly?month=${mm}&year=${yy}` + (employeeFilter ? `&employee=${encodeURIComponent(employeeFilter)}` : "");
-    openExternal(url);
-    toast("📥 เปิดในเบราว์เซอร์เพื่อดาวน์โหลด", "ok");
+    openExternalOrShowLink(url, "📥 ดาวน์โหลด Monthly Excel");
     return;
   }
 
