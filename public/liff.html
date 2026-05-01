@@ -525,15 +525,14 @@ function renderCal() {
     const dow    = dt.getDay();
     // ★ v1.7: เช็ควันหยุดนักขัตฤกษ์
     const holiday = STATE.holidays.find(h => h.date === dateStr);
+    // ★ v1.8 fix: ใส่ class day-type ทุกวัน (รวม future) เพื่อให้เห็นไฮไลท์
     let cls = "cal-day";
     if (isFuture) cls += " future";
-    else {
-      if (isTodayD) cls += " today";
-      if (isSel)    cls += " selected";
-      if (dow===0)  cls += " sun-day";
-      if (dow===6)  cls += " sat-day";
-      if (holiday)  cls += " holiday-day";
-    }
+    if (isTodayD) cls += " today";
+    if (isSel)    cls += " selected";
+    if (dow===0)  cls += " sun-day";
+    if (dow===6)  cls += " sat-day";
+    if (holiday)  cls += " holiday-day";
     const click = isFuture ? "" : `onclick="selectDate('${dateStr}',${dow})"`;
     const titleAttr = holiday ? `title="${holiday.name} (เหมาจ่าย)"` : (dow===0 ? `title="วันอาทิตย์ (เหมาจ่าย)"` : "");
     // ★ v1.8: ตัวเลขห่อใน span เพื่อทำวงกลมรอบ
