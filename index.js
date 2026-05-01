@@ -399,7 +399,7 @@ app.get("/api/edit-requests", async (req, res) => {
     const sheets = await getSheetsClient();
     const r      = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: "Edit_Requests!A3:F500",   // ★ row 3 onwards
+      range: "Edit_Requests!A3:F5000",  // ★ v1.14: ขยายจาก 500 → 5000 (~12 ปี)
     });
     const rows = (r.data.values || []).map((row, i) => ({
       idx: i, name: row[0], date: row[1], recordDesc: row[2],
@@ -446,7 +446,7 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:D200",
+    range: "Employees!A3:D500",  // ★ v1.14: ขยายจาก 200 → 500 (รองรับ 500 คน)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
@@ -461,7 +461,7 @@ async function getHolidayList(sheets) {
   try {
     const r = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: "Holidays!A3:C100",
+      range: "Holidays!A3:C500",  // ★ v1.14: ขยายจาก 100 → 500 (~25 ปี)
     });
     return (r.data.values || []).map((row, idx) => ({
       idx,
@@ -475,7 +475,7 @@ async function getHolidayList(sheets) {
 async function getAllRecords(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "OT_Records!A3:J2000",
+    range: "OT_Records!A3:J20000",  // ★ v1.14: ขยายจาก 2000 → 20000 (~12 ปี)
   });
   return (r.data.values || []).map((row, i) => ({
     idx: i, name: row[0]||"", date: row[1]||"",
