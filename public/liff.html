@@ -1148,7 +1148,13 @@ function renderAdminOverview() {
       <div class="kpi" style="border-color:#ef6c00"><div class="kpi-label">รอแก้ไข</div><div class="kpi-val" style="color:#ffb74d">${pendingReqs}</div><div class="kpi-label">คำขอ</div></div>
     </div>
     <div style="margin-bottom:12px;text-align:right">
-      <button class="btn btn-grey btn-sm" onclick="exportMonthlyExcel(${sel?`'${sel.replace(/'/g,"\\'")}'`:'""'})">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</button>
+      ${(() => {
+        const dNow = new Date();
+        const mm = String(dNow.getMonth()+1).padStart(2,"0");
+        const yy = String(dNow.getFullYear()+543);
+        const exportUrl = `/api/export/monthly?month=${mm}&year=${yy}` + (sel ? `&employee=${encodeURIComponent(sel)}` : "");
+        return `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 ดาวน์โหลด Excel');}">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</a>`;
+      })()}
     </div>
     ${bodyHtml}
   `;
