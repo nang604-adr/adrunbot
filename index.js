@@ -518,6 +518,7 @@ app.post("/api/payroll/commit", async (req, res) => {
 });
 
 // ── POST /api/payroll/undo — ปลด record ในรอบนั้นกลับเป็น pending ──
+// ★ v1.17.4: soft cleanup — ถ้าไม่เจอ record ก็ mark log เป็น undone (orphan cleanup)
 app.post("/api/payroll/undo", async (req, res) => {
   const { payId, undoneBy } = req.body;
   if (!payId) return res.status(400).json({ error: "ระบุ payId" });
@@ -525,19 +526,21 @@ app.post("/api/payroll/undo", async (req, res) => {
     const sheets = await getSheetsClient();
     const all    = await getAllRecords(sheets);
     const target = all.filter(r => r.paidAt === payId);
-    if (target.length === 0) return res.status(400).json({ error: `ไม่พบ records ในรอบ ${payId}` });
 
-    // ปลด column K ของทุก record ในรอบ
-    const updates = target.map(r => ({
-      range: `OT_Records!K${idxToRow(r.idx)}`,
-      values: [[""]],
-    }));
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      resource: { valueInputOption: "USER_ENTERED", data: updates },
-    });
+    // ปลด column K ของ records (ถ้ามี)
+    if (target.length > 0) {
+      const updates = target.map(r => ({
+        range: `OT_Records!K${idxToRow(r.idx)}`,
+        values: [[""]],
+      }));
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: { valueInputOption: "USER_ENTERED", data: updates },
+      });
+    }
 
-    // อัปเดต Payroll_Log status = "undone"
+    // อัปเดต Payroll_Log status = "undone" (ทำเสมอ — orphan cleanup)
+    let logUpdated = false;
     try {
       const r = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
@@ -554,12 +557,23 @@ app.post("/api/payroll/undo", async (req, res) => {
           valueInputOption: "USER_ENTERED",
           resource: { values: [["undone", now, undoneBy || "Admin"]] },
         });
+        logUpdated = true;
       }
     } catch (logErr) {
       console.error("Payroll_Log update failed:", logErr.message);
     }
 
-    res.json({ ok: true, payId, recordsRestored: target.length });
+    // ถ้าไม่เจอทั้ง records และ log → orphan ที่หาไม่เจอ
+    if (target.length === 0 && !logUpdated) {
+      return res.status(400).json({ error: `ไม่พบรอบจ่าย ${payId} ทั้งใน records และ Payroll_Log` });
+    }
+
+    res.json({
+      ok: true,
+      payId,
+      recordsRestored: target.length,
+      logCleanedOnly: target.length === 0,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

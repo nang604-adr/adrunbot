@@ -1832,7 +1832,11 @@ async function undoPayroll(payId) {
     });
     const data = await res.json();
     if (!res.ok) return toast(data.error || "Undo ไม่สำเร็จ", "err");
-    toast(`✅ ยกเลิกรอบจ่าย — ${data.recordsRestored} รายการกลับเป็น "รอจ่าย" แล้ว`, "ok");
+    if (data.logCleanedOnly) {
+      toast("✅ เคลียร์รอบจ่ายค้างเรียบร้อย (ไม่มี records)", "ok");
+    } else {
+      toast(`✅ ยกเลิกรอบจ่าย — ${data.recordsRestored} รายการกลับเป็น "รอจ่าย" แล้ว`, "ok");
+    }
     await loadPayrollHistory();
     await loadAdmin();
   } catch (e) {
