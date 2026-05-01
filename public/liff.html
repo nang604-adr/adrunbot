@@ -754,11 +754,23 @@ function buildDrum(id, items, initVal, onChange, fmt=v=>String(v).padStart(2,"0"
   el._items    = items;
   el._onChange = onChange;
   el._fmt      = fmt;
+  // ★ v1.19: คลิกตัวเลขแต่ละตัว → scroll ไปที่ตัวนั้น (smooth)
   el.innerHTML = `<div style="height:40px"></div>` +
-    items.map(v=>`<div class="drum-item ${v===initVal?'active':''}" style="height:40px">${fmt(v)}</div>`).join("") +
+    items.map((v,i)=>`<div class="drum-item ${v===initVal?'active':''}" style="height:40px" onclick="drumClickItem('${id}',${i})">${fmt(v)}</div>`).join("") +
     `<div style="height:40px"></div>`;
   const idx = items.indexOf(initVal);
   setTimeout(()=>{ el.scrollTop = idx*40; }, 50);
+}
+
+// ★ v1.19: คลิก drum item → smooth scroll ไปที่นั้น
+function drumClickItem(id, idx) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.scrollTo) {
+    el.scrollTo({ top: idx * 40, behavior: "smooth" });
+  } else {
+    el.scrollTop = idx * 40;
+  }
 }
 
 function onDrumScroll(el, key) {
