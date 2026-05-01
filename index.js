@@ -381,6 +381,15 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
 
 app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.1)"));
 
+// ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
+app.get("/liff", (_, res) => {
+  if (process.env.LIFF_ID) {
+    res.redirect(`https://liff.line.me/${process.env.LIFF_ID}`);
+  } else {
+    res.status(500).send("LIFF_ID env var not configured");
+  }
+});
+
 // ══════════════════════════════════════════════════════════════
 // GOOGLE SHEETS HELPERS  (★ all ranges start at row 3)
 // ══════════════════════════════════════════════════════════════
@@ -498,7 +507,10 @@ async function handleBotEvent(event) {
   const lower = text.toLowerCase();
   if (!lower.startsWith("#ot") && !lower.startsWith("#โอที")) return;
 
-  const liffUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN || "your-app.up.railway.app"}/liff`;
+  // ★ ใช้ canonical LIFF URL — LINE จะ redirect ไป Endpoint URL ที่ตั้งไว้เอง
+  const liffUrl = process.env.LIFF_ID
+    ? `https://liff.line.me/${process.env.LIFF_ID}`
+    : `https://${process.env.RAILWAY_PUBLIC_DOMAIN || "your-app.up.railway.app"}`;
 
   if (lower === "#ot" || lower.includes("เปิด") || lower.includes("บันทึก")) {
     return client.replyMessage(event.replyToken, {
