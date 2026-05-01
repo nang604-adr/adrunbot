@@ -1,14 +1,21 @@
 // ============================================================
-// OT LINE Bot + LIFF Server — index.js
+// OT LINE Bot + LIFF Server — index.js  (v1.1 — B+ patches)
 // บริษัท Adrun
 // LINE Messaging API (Bot) + LIFF REST API + Static file serve
+// ============================================================
+// CHANGES vs v1.0:
+//   • Employees / Holidays / OT_Records / Edit_Requests อ่านจาก row 3 (ข้าม 2 header rows)
+//   • เพิ่มคอลัมน์ userId (D) ใน Employees → match ด้วย userId เป็นหลัก
+//   • Auto-bind userId ตอน user แรก login (จับคู่ด้วย displayName ครั้งแรก)
+//   • เพิ่ม endpoints: DELETE employees, PUT/DELETE holidays
+//   • Auto-set "วันในสัปดาห์" ตอนเพิ่ม/แก้วันหยุด
 // ============================================================
 require("dotenv").config();
 const express    = require("express");
 const line       = require("@line/bot-sdk");
 const { google } = require("googleapis");
 const path       = require("path");
-const https      = require("https");
+const crypto     = require("crypto");
 
 // ── LINE Config ──────────────────────────────────────────────
 const lineConfig = {
@@ -17,15 +24,14 @@ const lineConfig = {
 };
 const client = new line.Client(lineConfig);
 const app    = express();
-const crypto = require("crypto");
 
 // ── Webhook ต้องมาก่อน express.json() เสมอ ──────────────────
 app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
   res.json({ status: "ok" });
-  const body   = req.body;
-  const sig    = req.headers["x-line-signature"];
-  const hash   = crypto.createHmac("SHA256", process.env.LINE_SECRET)
-                        .update(body).digest("base64");
+  const body = req.body;
+  const sig  = req.headers["x-line-signature"];
+  const hash = crypto.createHmac("SHA256", process.env.LINE_SECRET)
+                     .update(body).digest("base64");
   if (sig !== hash) return;
   const events = JSON.parse(body.toString()).events || [];
   await Promise.all(events.map(handleBotEvent));
@@ -33,7 +39,7 @@ app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
 
 // ── Middleware ───────────────────────────────────────────────
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public"))); // serve LIFF HTML
+app.use(express.static(path.join(__dirname, "public")));   // serve LIFF HTML
 
 // ── Google Sheets ────────────────────────────────────────────
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
@@ -50,6 +56,12 @@ async function getSheetsClient() {
 const MAX_OT_PER_DAY     = 5;
 const WEEKDAY_MULTIPLIER = 1.5;
 
+// ★ data ทุก sheet เริ่มที่ row 3 (มี 2 header rows)
+const DATA_START_ROW = 3;
+
+// Helper: idx (0-based ใน array) → row จริง (1-indexed) ใน sheet
+const idxToRow = (idx) => idx + DATA_START_ROW;
+
 // ══════════════════════════════════════════════════════════════
 // LIFF REST API ENDPOINTS
 // ══════════════════════════════════════════════════════════════
@@ -59,23 +71,54 @@ app.get("/api/config", (_, res) => {
   res.json({ liffId: process.env.LIFF_ID });
 });
 
-// ── GET /api/me?userId=Uxxxx — ดึงข้อมูลพนักงาน ────────────
+// ── GET /api/me?userId=Uxxxx&displayName=xxx ────────────────
+// ★ B+ patch: match by userId first → fall back displayName + auto-bind
 app.get("/api/me", async (req, res) => {
   const { userId, displayName } = req.query;
   try {
     const sheets    = await getSheetsClient();
     const employees = await getEmployees(sheets);
-    const admins    = (process.env.ADMIN_LINE_IDS || "").split(",").map(s => s.trim());
+    const admins    = (process.env.ADMIN_LINE_IDS || "")
+                        .split(",").map(s => s.trim()).filter(Boolean);
 
-    const emp = employees.find(e => e.name === displayName);
+    // 1) จับคู่ด้วย userId ก่อน (น่าเชื่อถือสุด)
+    let emp = employees.find(e => e.userId && e.userId === userId);
+    let matchedBy = emp ? "userId" : null;
+
+    // 2) ถ้าไม่เจอ → fallback หาด้วย displayName
+    if (!emp && displayName) {
+      emp = employees.find(e => e.name === displayName);
+      if (emp) {
+        matchedBy = "displayName";
+        // 3) auto-bind: เจอด้วยชื่อ + ยังไม่มี userId → เขียนกลับ
+        if (!emp.userId && userId) {
+          const row = idxToRow(emp.idx);
+          try {
+            await sheets.spreadsheets.values.update({
+              spreadsheetId: SHEET_ID,
+              range: `Employees!D${row}`,
+              valueInputOption: "USER_ENTERED",
+              resource: { values: [[userId]] },
+            });
+            console.log(`🔗 Auto-bound userId ${userId} → ${emp.name}`);
+            matchedBy = "displayName+autoBind";
+          } catch (err) {
+            console.error("auto-bind failed:", err.message);
+          }
+        }
+      }
+    }
+
     const isAdmin = admins.includes(userId);
 
     res.json({
       found:       !!emp,
-      name:        displayName,
+      name:        emp?.name || displayName || "",
+      userId,
       isAdmin,
       hourlyRate:  emp?.hourlyRate  || 0,
       holidayFlat: emp?.holidayFlat || 0,
+      matchedBy,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -98,7 +141,7 @@ app.get("/api/records", async (req, res) => {
   }
 });
 
-// ── GET /api/employees — รายชื่อพนักงานทั้งหมด (Admin) ──────
+// ── GET /api/employees ──────────────────────────────────────
 app.get("/api/employees", async (req, res) => {
   try {
     const sheets = await getSheetsClient();
@@ -108,11 +151,107 @@ app.get("/api/employees", async (req, res) => {
   }
 });
 
-// ── GET /api/holidays — วันหยุดประจำปี ──────────────────────
+// ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
+app.post("/api/employees", async (req, res) => {
+  const { name, hourlyRate, holidayFlat, userId } = req.body;
+  try {
+    const sheets = await getSheetsClient();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: "Employees!A:D",
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [[name, hourlyRate, holidayFlat, userId || ""]] },
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
+app.put("/api/employees/:idx", async (req, res) => {
+  const row = idxToRow(Number(req.params.idx));
+  const { name, hourlyRate, holidayFlat, userId } = req.body;
+  try {
+    const sheets = await getSheetsClient();
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Employees!A${row}:D${row}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [[name, hourlyRate, holidayFlat, userId || ""]] },
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /api/employees/:idx — ลบพนักงาน (Admin) ★ NEW ────
+app.delete("/api/employees/:idx", async (req, res) => {
+  const row = idxToRow(Number(req.params.idx));
+  try {
+    const sheets = await getSheetsClient();
+    await deleteRow(sheets, "Employees", row);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/holidays ───────────────────────────────────────
 app.get("/api/holidays", async (req, res) => {
   try {
     const sheets = await getSheetsClient();
     res.json({ holidays: await getHolidayList(sheets) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/holidays — เพิ่มวันหยุด (Admin) ───────────────
+app.post("/api/holidays", async (req, res) => {
+  const { date, name: hName } = req.body;
+  try {
+    const sheets = await getSheetsClient();
+    const dow    = getDowFullThai(date);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: "Holidays!A:C",
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [[date, dow, hName]] },
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PUT /api/holidays/:idx — แก้ไขวันหยุด (Admin) ★ NEW ─────
+app.put("/api/holidays/:idx", async (req, res) => {
+  const row = idxToRow(Number(req.params.idx));
+  const { date, name: hName } = req.body;
+  try {
+    const sheets = await getSheetsClient();
+    const dow    = getDowFullThai(date);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Holidays!A${row}:C${row}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [[date, dow, hName]] },
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /api/holidays/:idx — ลบวันหยุด (Admin) ★ NEW ─────
+app.delete("/api/holidays/:idx", async (req, res) => {
+  const row = idxToRow(Number(req.params.idx));
+  try {
+    const sheets = await getSheetsClient();
+    await deleteRow(sheets, "Holidays", row);
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -129,10 +268,10 @@ app.post("/api/ot", async (req, res) => {
 
     const holidays = await getHolidayList(sheets);
     const [dd, mm, yy] = date.split("/");
-    const jsDate   = new Date(Number(yy) - 543, Number(mm) - 1, Number(dd));
-    const dow      = jsDate.getDay();
+    const jsDate    = new Date(Number(yy) - 543, Number(mm) - 1, Number(dd));
+    const dow       = jsDate.getDay();
     const isHolDate = holidays.some(h => h.date === date);
-    const isSun    = dow === 0;
+    const isSun     = dow === 0;
     const isHoliday = otType === "holiday" || isHolDate || isSun;
 
     if (isHoliday) {
@@ -145,7 +284,7 @@ app.post("/api/ot", async (req, res) => {
     }
 
     const hours = calcHours(startTime, endTime);
-    if (hours <= 0)          return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
+    if (hours <= 0)            return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
     if (hours > MAX_OT_PER_DAY) return res.status(400).json({ error: `OT สูงสุด ${MAX_OT_PER_DAY} ชม./วัน` });
 
     const alreadyDay = await getDayHours(sheets, name, date);
@@ -181,58 +320,6 @@ app.post("/api/edit-request", async (req, res) => {
   }
 });
 
-// ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
-app.put("/api/employees/:idx", async (req, res) => {
-  const idx = Number(req.params.idx) + 2; // row = idx + 2 (1 header + 1-indexed)
-  const { name, hourlyRate, holidayFlat } = req.body;
-  try {
-    const sheets = await getSheetsClient();
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `Employees!A${idx}:C${idx}`,
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [[name, hourlyRate, holidayFlat]] },
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
-app.post("/api/employees", async (req, res) => {
-  const { name, hourlyRate, holidayFlat } = req.body;
-  try {
-    const sheets = await getSheetsClient();
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: "Employees!A:C",
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [[name, hourlyRate, holidayFlat]] },
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── POST /api/holidays — เพิ่มวันหยุด (Admin) ───────────────
-app.post("/api/holidays", async (req, res) => {
-  const { date, name: hName } = req.body;
-  try {
-    const sheets = await getSheetsClient();
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: "Holidays!A:C",
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [[date, "", hName]] },
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ── GET /api/admin/records — ทุก record สำหรับ Admin ─────────
 app.get("/api/admin/records", async (req, res) => {
   const { month, year } = req.query;
@@ -253,7 +340,8 @@ app.get("/api/edit-requests", async (req, res) => {
   try {
     const sheets = await getSheetsClient();
     const r      = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID, range: "Edit_Requests!A2:F500",
+      spreadsheetId: SHEET_ID,
+      range: "Edit_Requests!A3:F500",   // ★ row 3 onwards
     });
     const rows = (r.data.values || []).map((row, i) => ({
       idx: i, name: row[0], date: row[1], recordDesc: row[2],
@@ -267,7 +355,7 @@ app.get("/api/edit-requests", async (req, res) => {
 
 // ── PUT /api/edit-requests/:idx — อนุมัติ/ปฏิเสธ (Admin) ─────
 app.put("/api/edit-requests/:idx", async (req, res) => {
-  const row    = Number(req.params.idx) + 2;
+  const row    = idxToRow(Number(req.params.idx));
   const { status } = req.body;
   try {
     const sheets = await getSheetsClient();
@@ -283,29 +371,48 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running"));
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.1)"));
 
 // ══════════════════════════════════════════════════════════════
-// GOOGLE SHEETS HELPERS
+// GOOGLE SHEETS HELPERS  (★ all ranges start at row 3)
 // ══════════════════════════════════════════════════════════════
 async function getEmployees(sheets) {
-  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: "Employees!A2:C200" });
-  return (r.data.values || []).map(row => ({
-    name: (row[0] || "").trim(), hourlyRate: Number(row[1]) || 80, holidayFlat: Number(row[2]) || 500,
+  const r = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Employees!A3:D200",
+  });
+  return (r.data.values || []).map((row, idx) => ({
+    idx,
+    name:        (row[0] || "").trim(),
+    hourlyRate:  Number(row[1]) || 80,
+    holidayFlat: Number(row[2]) || 500,
+    userId:      (row[3] || "").trim(),
   })).filter(e => e.name);
 }
 
 async function getHolidayList(sheets) {
   try {
-    const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: "Holidays!A2:C100" });
-    return (r.data.values || []).map(row => ({ date: (row[0]||"").trim(), name: (row[2]||row[1]||"").trim() })).filter(h => h.date);
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: "Holidays!A3:C100",
+    });
+    return (r.data.values || []).map((row, idx) => ({
+      idx,
+      date: (row[0]||"").trim(),
+      day:  (row[1]||"").trim(),
+      name: (row[2]||"").trim(),
+    })).filter(h => h.date);
   } catch (_) { return []; }
 }
 
 async function getAllRecords(sheets) {
-  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: "OT_Records!A2:J2000" });
+  const r = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "OT_Records!A3:J2000",
+  });
   return (r.data.values || []).map((row, i) => ({
-    idx: i, name: row[0]||"", date: row[1]||"", startTime: row[2]||"-", endTime: row[3]||"-",
+    idx: i, name: row[0]||"", date: row[1]||"",
+    startTime: row[2]||"-", endTime: row[3]||"-",
     hours: Number(row[4])||0, task: row[5]||"", location: row[6]||"",
     otType: row[7]||"", pay: Number(row[8])||0, createdAt: row[9]||"",
   }));
@@ -320,9 +427,38 @@ async function getDayHours(sheets, name, date) {
 async function saveRecord(sheets, data) {
   const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
   await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID, range: "OT_Records!A:J", valueInputOption: "USER_ENTERED",
-    resource: { values: [[data.name, data.date, data.startTime, data.endTime,
-      data.hours, data.task, data.location||"", data.otType, data.pay, now]] },
+    spreadsheetId: SHEET_ID,
+    range: "OT_Records!A:J",
+    valueInputOption: "USER_ENTERED",
+    resource: { values: [[
+      data.name, data.date, data.startTime, data.endTime,
+      data.hours, data.task, data.location || "",
+      data.otType, data.pay, now,
+    ]] },
+  });
+}
+
+// ★ ลบ row จริงด้วย batchUpdate (ไม่ใช่ clear)
+async function deleteRow(sheets, sheetName, rowIndex1Based) {
+  const meta  = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheet = meta.data.sheets.find(s => s.properties.title === sheetName);
+  if (!sheet) throw new Error(`ไม่พบชีต "${sheetName}"`);
+  const sheetId = sheet.properties.sheetId;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    resource: {
+      requests: [{
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension:  "ROWS",
+            startIndex: rowIndex1Based - 1,  // 0-indexed inclusive
+            endIndex:   rowIndex1Based,      // exclusive
+          },
+        },
+      }],
+    },
   });
 }
 
@@ -334,11 +470,20 @@ function calcHours(start, end) {
 }
 
 function getTodayThai() {
-  const d  = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+  const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
   return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()+543}`;
 }
 
-// ── Bot event handler (ย่อ — เหมือน index.js เดิม) ──────────
+// ★ NEW: คำนวณ "วันในสัปดาห์" จาก dd/mm/yyyy(พ.ศ.)
+function getDowFullThai(thaiDateStr) {
+  const [dd, mm, yy] = String(thaiDateStr).split("/");
+  const d = new Date(Number(yy) - 543, Number(mm) - 1, Number(dd));
+  return ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][d.getDay()] || "";
+}
+
+// ══════════════════════════════════════════════════════════════
+// LINE BOT EVENT HANDLER
+// ══════════════════════════════════════════════════════════════
 async function handleBotEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
   const text  = event.message.text.trim();
@@ -347,7 +492,6 @@ async function handleBotEvent(event) {
 
   const liffUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN || "your-app.up.railway.app"}/liff`;
 
-  // ถ้าพิมพ์ #OT หรือ #OT เปิด → ส่ง LIFF link
   if (lower === "#ot" || lower.includes("เปิด") || lower.includes("บันทึก")) {
     return client.replyMessage(event.replyToken, {
       type: "template",
@@ -361,7 +505,6 @@ async function handleBotEvent(event) {
     });
   }
 
-  // ยังรองรับการพิมพ์คำสั่งแบบเดิมด้วย
   try {
     const groupId = event.source.groupId;
     const userId  = event.source.userId;
@@ -375,10 +518,13 @@ async function handleBotEvent(event) {
 
     const sheets    = await getSheetsClient();
     const employees = await getEmployees(sheets);
-    const empData   = employees.find(e => e.name === senderName);
+
+    // ★ B+ patch: หาด้วย userId ก่อน → fallback displayName
+    let empData = employees.find(e => e.userId && e.userId === userId);
+    if (!empData) empData = employees.find(e => e.name === senderName);
 
     if (lower.includes("สรุป")) {
-      return client.replyMessage(event.replyToken, await buildSummary(sheets, senderName));
+      return client.replyMessage(event.replyToken, await buildSummary(sheets, empData?.name || senderName));
     }
     if (lower.includes("ช่วย") || lower.includes("help")) {
       return client.replyMessage(event.replyToken, {
@@ -391,18 +537,18 @@ async function handleBotEvent(event) {
       return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ไม่พบชื่อ "${senderName}" กรุณาแจ้ง Admin` });
     }
 
-    const holidays     = await getHolidayList(sheets);
-    const todayDate    = getTodayThai();
-    const todayDow     = new Date().getDay();
-    const isHolDate    = holidays.some(h => h.date === todayDate);
-    const isHolCmd     = lower.includes("วันหยุด") || lower.includes("หยุด");
+    const holidays  = await getHolidayList(sheets);
+    const todayDate = getTodayThai();
+    const todayDow  = new Date().getDay();
+    const isHolDate = holidays.some(h => h.date === todayDate);
+    const isHolCmd  = lower.includes("วันหยุด") || lower.includes("หยุด");
 
     if (isHolCmd || isHolDate || todayDow === 0) {
       const parts    = text.replace(/#OT/i,"").replace(/วันหยุด|หยุด/g,"").trim();
       const [task="", location=""] = parts.includes("|") ? parts.split("|").map(s=>s.trim()) : [parts, ""];
       const typeLabel = todayDow===0 ? "วันอาทิตย์" : isHolDate ? "วันหยุดนักขัตฤกษ์" : "วันหยุด";
-      await saveRecord(sheets, { name:senderName, date:todayDate, startTime:"-", endTime:"-", hours:0, task:task||"-", location, otType:typeLabel, pay:empData.holidayFlat });
-      return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT ${typeLabel}\n👤 ${senderName}\n📝 ${task||"-"}\n📅 ${todayDate}` });
+      await saveRecord(sheets, { name:empData.name, date:todayDate, startTime:"-", endTime:"-", hours:0, task:task||"-", location, otType:typeLabel, pay:empData.holidayFlat });
+      return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT ${typeLabel}\n👤 ${empData.name}\n📝 ${task||"-"}\n📅 ${todayDate}` });
     }
 
     const times = [...text.matchAll(/\b(\d{1,2}):(\d{2})\b/g)];
@@ -410,16 +556,16 @@ async function handleBotEvent(event) {
 
     const [startTime, endTime] = [times[0][0], times[1][0]];
     const hours    = calcHours(startTime, endTime);
-    const already  = await getDayHours(sheets, senderName, todayDate);
-    if (hours <= 0)                          return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
-    if (hours > MAX_OT_PER_DAY)              return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ เกิน ${MAX_OT_PER_DAY} ชม./วัน` });
-    if (already + hours > MAX_OT_PER_DAY)    return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ วันนี้บันทึกไปแล้ว ${already} ชม.` });
+    const already  = await getDayHours(sheets, empData.name, todayDate);
+    if (hours <= 0)                       return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
+    if (hours > MAX_OT_PER_DAY)           return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ เกิน ${MAX_OT_PER_DAY} ชม./วัน` });
+    if (already + hours > MAX_OT_PER_DAY) return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ วันนี้บันทึกไปแล้ว ${already} ชม.` });
 
-    const after    = text.replace(/#OT/i,"").replace(startTime,"").replace(endTime,"").trim();
+    const after = text.replace(/#OT/i,"").replace(startTime,"").replace(endTime,"").trim();
     const [task="", location=""] = after.includes("|") ? after.split("|").map(s=>s.trim()) : [after, ""];
-    const pay      = Math.round(hours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
-    await saveRecord(sheets, { name:senderName, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
-    return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT\n👤 ${senderName}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${task||"-"}\n📅 ${todayDate}` });
+    const pay   = Math.round(hours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
+    await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
+    return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${task||"-"}\n📅 ${todayDate}` });
 
   } catch (err) {
     console.error(err);
@@ -441,4 +587,4 @@ async function buildSummary(sheets, name) {
 
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT}`));
+app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)`));
