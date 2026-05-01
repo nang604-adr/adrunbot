@@ -438,6 +438,8 @@ let STATE = {
   chartEmpFilter: "",
   chartSort: "days",
   chartCompare: [],
+  payrollCutoff: "",
+  payCalYear: 0, payCalMonth: 0,
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -1545,6 +1547,10 @@ function pad2(n) { return String(n).padStart(2, "0"); }
 
 async function renderAdminPayroll() {
   if (!STATE.payrollCutoff) STATE.payrollCutoff = todayThai();
+  // คำนวณ dow ของ cutoff สำหรับแสดง badge
+  const [cd, cm, cy] = STATE.payrollCutoff.split("/").map(Number);
+  const cutoffDow = new Date(cy-543, cm-1, cd).getDay();
+  const dowClass = cutoffDow===0?'day-sun':cutoffDow===6?'day-sat':'day-wday';
 
   document.getElementById("admin-payroll").innerHTML = `
     <div class="card">
@@ -1557,8 +1563,25 @@ async function renderAdminPayroll() {
           เลือกวันที่ตัดรอบ — record ทุกอันที่ <b>วันที่ทำงาน ≤ cutoff</b> และยังไม่จ่าย จะถูกรวมในรอบนี้
         </div>
 
-        <label style="font-size:10px;color:var(--sub);margin-bottom:5px">วันที่ตัดรอบ (DD/MM/YYYY พ.ศ.):</label>
-        <input id="payCutoff" placeholder="28/05/2569" value="${STATE.payrollCutoff}" maxlength="10" oninput="formatThaiDate(this)" style="margin-bottom:10px">
+        <label style="font-size:10px;color:var(--sub);margin-bottom:5px">วันที่ตัดรอบ:</label>
+        <button class="date-btn" onclick="togglePayCal()" style="margin-bottom:10px">
+          <div class="date-val">
+            <span>📅</span>
+            <span id="payCutoffDisplay" style="font-size:14px;font-weight:700">${STATE.payrollCutoff}</span>
+            <span class="day-badge ${dowClass}" id="payCutoffDow">วัน${DAYS_FULL[cutoffDow]}</span>
+          </div>
+          <span style="color:var(--sub);font-size:12px" id="payCalArrow">▼</span>
+        </button>
+        <div id="payCalWrap" style="display:none;margin-bottom:10px">
+          <div class="cal-wrap">
+            <div class="cal-nav">
+              <button class="cal-nav-btn" onclick="payCalPrev()">‹</button>
+              <div class="cal-title" id="payCalTitle">--</div>
+              <button class="cal-nav-btn" onclick="payCalNext()">›</button>
+            </div>
+            <div class="cal-grid" id="payCalGrid"></div>
+          </div>
+        </div>
         <button class="btn btn-grey btn-sm" onclick="loadPayrollPreview()" style="width:100%">🔍 ดูตัวอย่าง</button>
       </div>
     </div>
@@ -1574,12 +1597,76 @@ async function renderAdminPayroll() {
   await loadPayrollHistory();
 }
 
-async function loadPayrollPreview() {
-  const cutoff = document.getElementById("payCutoff").value.trim();
-  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
-    return toast("กรุณาใส่วันที่ในรูป DD/MM/YYYY", "err");
+// ★ v1.15.2: Payroll cutoff calendar picker
+function togglePayCal() {
+  const w = document.getElementById("payCalWrap");
+  const a = document.getElementById("payCalArrow");
+  const isOpen = w.style.display !== "none";
+  w.style.display = isOpen ? "none" : "block";
+  a.textContent = isOpen ? "▼" : "▲";
+  if (!isOpen) {
+    // Init view to current cutoff month
+    const [, mm, yy] = STATE.payrollCutoff.split("/").map(Number);
+    STATE.payCalYear = yy - 543;
+    STATE.payCalMonth = mm - 1;
+    renderPayCal();
   }
-  STATE.payrollCutoff = cutoff;
+}
+
+function renderPayCal() {
+  const y = STATE.payCalYear;
+  const m = STATE.payCalMonth;
+  document.getElementById("payCalTitle").textContent = `${MONTHS_SHORT[m]} ${y+543}`;
+  const grid = document.getElementById("payCalGrid");
+  const firstDow = new Date(y, m, 1).getDay();
+  const days = new Date(y, m+1, 0).getDate();
+
+  let html = DAYS_TH.map((d,i)=>`<div class="cal-hdr ${i===0?'sun':i===6?'sat':''}">${d}</div>`).join("");
+  for (let i=0;i<firstDow;i++) html += `<div></div>`;
+  for (let d=1;d<=days;d++) {
+    const dt = new Date(y, m, d);
+    const dd = String(d).padStart(2,"0");
+    const mm2 = String(m+1).padStart(2,"0");
+    const dateStr = `${dd}/${mm2}/${y+543}`;
+    const isSel = dateStr === STATE.payrollCutoff;
+    const dow = dt.getDay();
+    let cls = "cal-day";
+    if (isSel) cls += " selected";
+    if (dow===0) cls += " sun-day";
+    if (dow===6) cls += " sat-day";
+    html += `<div class="${cls}" onclick="selectPayCutoff('${dateStr}',${dow})"><span class="cal-day-num">${d}</span></div>`;
+  }
+  grid.innerHTML = html;
+}
+
+function payCalPrev() {
+  if (--STATE.payCalMonth < 0) { STATE.payCalMonth = 11; STATE.payCalYear--; }
+  renderPayCal();
+}
+function payCalNext() {
+  if (++STATE.payCalMonth > 11) { STATE.payCalMonth = 0; STATE.payCalYear++; }
+  renderPayCal();
+}
+
+function selectPayCutoff(dateStr, dow) {
+  STATE.payrollCutoff = dateStr;
+  document.getElementById("payCutoffDisplay").textContent = dateStr;
+  const badge = document.getElementById("payCutoffDow");
+  badge.textContent = `วัน${DAYS_FULL[dow]}`;
+  badge.className = `day-badge ${dow===0?'day-sun':dow===6?'day-sat':'day-wday'}`;
+  // close calendar
+  document.getElementById("payCalWrap").style.display = "none";
+  document.getElementById("payCalArrow").textContent = "▼";
+  // clear previous preview
+  document.getElementById("payPreviewArea").innerHTML = "";
+  payrollPreview = null;
+}
+
+async function loadPayrollPreview() {
+  const cutoff = STATE.payrollCutoff;
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
+    return toast("กรุณาเลือกวันที่ตัดรอบ", "err");
+  }
 
   const area = document.getElementById("payPreviewArea");
   area.innerHTML = `<div class="card"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div></div>`;
