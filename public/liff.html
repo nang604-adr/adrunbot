@@ -789,16 +789,9 @@ function updateHours() {
     return;
   }
   const crossLabel = crossDay ? `<span style="font-size:9px;opacity:.7"> ข้ามวัน</span>` : "";
-
-  if (h > 5) {
-    pill.innerHTML = `${h} ชม.${crossLabel} <span style="font-size:9px;opacity:.8">(คิด 5)</span>`;
-    pill.style.background = "rgba(255,167,38,.15)";
-    pill.style.color = "#ffb74d";
-  } else {
-    pill.innerHTML = `${h} ชม.${crossLabel}`;
-    pill.style.background = "rgba(0,185,0,.15)";
-    pill.style.color = "var(--green2)";
-  }
+  pill.innerHTML = `${h} ชม.${crossLabel}`;
+  pill.style.background = "rgba(0,185,0,.15)";
+  pill.style.color = "var(--green2)";
 }
 
 // ══════════════════════════════════════════════════════════════
