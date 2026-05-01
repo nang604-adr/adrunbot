@@ -539,33 +539,39 @@ app.post("/api/payroll/undo", async (req, res) => {
       });
     }
 
-    // อัปเดต Payroll_Log status = "undone" (ทำเสมอ — orphan cleanup)
-    let logUpdated = false;
+    // ★ v1.17.5: อัปเดต Payroll_Log status = "undone" — ทุก row ที่ match payId (กันมี duplicate)
+    let logUpdated = 0;
     try {
       const r = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: "Payroll_Log!A3:J5000",
       });
       const rows = r.data.values || [];
-      const logIdx = rows.findIndex(row => row[0] === payId);
-      if (logIdx >= 0) {
-        const row = logIdx + 3;
+      const matches = [];
+      rows.forEach((row, i) => {
+        if ((row[0] || "").trim() === payId && (row[7] || "active").trim() !== "undone") {
+          matches.push(i);
+        }
+      });
+      if (matches.length > 0) {
         const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
-        await sheets.spreadsheets.values.update({
+        const updates = matches.map(idx => ({
+          range: `Payroll_Log!H${idx + 3}:J${idx + 3}`,
+          values: [["undone", now, undoneBy || "Admin"]],
+        }));
+        await sheets.spreadsheets.values.batchUpdate({
           spreadsheetId: SHEET_ID,
-          range: `Payroll_Log!H${row}:J${row}`,
-          valueInputOption: "USER_ENTERED",
-          resource: { values: [["undone", now, undoneBy || "Admin"]] },
+          resource: { valueInputOption: "USER_ENTERED", data: updates },
         });
-        logUpdated = true;
+        logUpdated = matches.length;
       }
     } catch (logErr) {
       console.error("Payroll_Log update failed:", logErr.message);
     }
 
     // ถ้าไม่เจอทั้ง records และ log → orphan ที่หาไม่เจอ
-    if (target.length === 0 && !logUpdated) {
-      return res.status(400).json({ error: `ไม่พบรอบจ่าย ${payId} ทั้งใน records และ Payroll_Log` });
+    if (target.length === 0 && logUpdated === 0) {
+      return res.status(400).json({ error: `ไม่พบรอบจ่าย ${payId} ทั้งใน records และ Payroll_Log (อาจถูกยกเลิกไปแล้ว)` });
     }
 
     res.json({
@@ -573,6 +579,7 @@ app.post("/api/payroll/undo", async (req, res) => {
       payId,
       recordsRestored: target.length,
       logCleanedOnly: target.length === 0,
+      logRowsUpdated: logUpdated,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
