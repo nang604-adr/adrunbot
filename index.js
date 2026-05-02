@@ -74,6 +74,54 @@ function styleSheet(ws, opts = {}) {
   return ws;
 }
 
+// ★ v1.29: page setup ให้พิมพ์พอดี A4
+//   - landscape (เพราะตารางกว้าง)
+//   - fit-to-width = 1 หน้า, height = auto
+//   - margin บาง 0.4 นิ้ว
+//   - จัดกลางหน้า (horizontalCentered)
+function applyA4Print(ws, opts = {}) {
+  if (!ws) return ws;
+  const orientation = opts.orientation || "landscape";
+  ws["!pageSetup"] = {
+    paperSize: 9,           // 9 = A4
+    orientation,            // 'landscape' | 'portrait'
+    fitToWidth: 1,
+    fitToHeight: 0,         // 0 = auto (กี่หน้าก็ได้)
+    scale: 100,
+    horizontalDpi: 300,
+    verticalDpi: 300,
+  };
+  ws["!margins"] = {
+    left: 0.4, right: 0.4,
+    top: 0.5, bottom: 0.5,
+    header: 0.3, footer: 0.3,
+  };
+  // จัดกลางหน้า (horizontal) + fit page
+  ws["!printOptions"] = {
+    horizontalCentered: true,
+  };
+  // sheetPr.pageSetUpPr.fitToPage = true
+  ws["!sheetPr"] = {
+    pageSetUpPr: { fitToPage: true },
+  };
+  return ws;
+}
+
+// ★ v1.29: ตั้ง print area + repeat header rows ให้ workbook
+function setPrintTitles(wb, sheetName, headerRowsZeroBased) {
+  if (!headerRowsZeroBased || headerRowsZeroBased < 0) return;
+  wb.Workbook = wb.Workbook || {};
+  wb.Workbook.Names = wb.Workbook.Names || [];
+  const sheetIdx = wb.SheetNames.indexOf(sheetName);
+  if (sheetIdx < 0) return;
+  // ใช้ชื่อ sheet ห่อด้วย ' (สำหรับชื่อภาษาไทย)
+  wb.Workbook.Names.push({
+    Name: "_xlnm.Print_Titles",
+    Sheet: sheetIdx,
+    Ref: `'${sheetName}'!$1:$${headerRowsZeroBased + 1}`,
+  });
+}
+
 // ── LINE Config ──────────────────────────────────────────────
 const lineConfig = {
   channelAccessToken: process.env.LINE_TOKEN,
@@ -1021,7 +1069,9 @@ app.get("/api/export/monthly", async (req, res) => {
     // merge title row across columns
     ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }];
     styleSheet(ws1, { titleRow: 0, headerRow: 2 });
+    applyA4Print(ws1, { orientation: "landscape" });
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+    setPrintTitles(wb, "สรุป", 2);
 
     // ── Details ──
     const detailRows = [
@@ -1037,7 +1087,9 @@ app.get("/api/export/monthly", async (req, res) => {
     const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
     ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:28},{wch:16},{wch:18},{wch:12},{wch:14}];
     styleSheet(ws2, { headerRow: 0 });
+    applyA4Print(ws2, { orientation: "landscape" });
     XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+    setPrintTitles(wb, "รายละเอียด", 0);
 
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
     const fname = (employee ? `OT_${employee}` : "OT_All") + `_${mm}-${yy}.xlsx`;
@@ -1130,7 +1182,9 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },  // title
     ];
     styleSheet(ws1, { titleRow: 0, headerRow: 4 });
+    applyA4Print(ws1, { orientation: "landscape" });
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
+    setPrintTitles(wb, "สรุป", 4);
 
     // ── ★ v1.26: Per-employee sheets (1 sheet per คน แบบตัวอย่าง) ──
     const thaiDays = ["อา","จ","อ","พ","พฤ","ศ","ส"];
@@ -1223,6 +1277,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
         { s: { r: 1, c: 0 }, e: { r: 1, c: 8 } },  // รอบจ่าย
       ];
       styleSheet(wsEmp, { titleRow: 0, headerRow: 3 });
+      applyA4Print(wsEmp, { orientation: "landscape" });
 
       // unique sheet name
       let sname = safeSheetName(emp.name);
@@ -1233,6 +1288,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       }
       usedSheetNames.add(sname);
       XLSX.utils.book_append_sheet(wb, wsEmp, sname);
+      setPrintTitles(wb, sname, 3);
     });
 
     // ── Details (ทั้งหมดรวมกัน — เก็บไว้สำหรับอ้างอิง) ──
@@ -1248,7 +1304,9 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
     const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
     ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:28},{wch:16},{wch:18},{wch:12},{wch:20}];
     styleSheet(ws2, { headerRow: 0 });
+    applyA4Print(ws2, { orientation: "landscape" });
     XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียดทั้งหมด");
+    setPrintTitles(wb, "รายละเอียดทั้งหมด", 0);
 
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
     const fname = `Payroll_${payId}.xlsx`;
@@ -1260,7 +1318,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.28)"));
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.29)"));
 
 // ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
 app.get("/liff", (_, res) => {
