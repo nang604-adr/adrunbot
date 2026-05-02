@@ -66,8 +66,10 @@ const MAX_OT_PER_DAY     = 5;
 const WEEKDAY_MULTIPLIER = 1.5;
 
 // ★ v1.3: เวลางานปกติ จันทร์–เสาร์ (ห้ามลง OT ทับ)
-const WORK_START_MIN = 8 * 60 + 30;   // 08:30 = 510
-const WORK_END_MIN   = 17 * 60 + 30;  // 17:30 = 1050
+const WORK_START_MIN     = 8 * 60 + 30;   // 08:30 = 510
+const WORK_END_MIN       = 17 * 60 + 30;  // 17:30 = 1050
+// ★ v1.27: เสาร์ครึ่งวันสำหรับพนักงานบางคน — ทำถึง 12:00 → OT เริ่มได้ตั้งแต่ 12:00
+const WORK_END_MIN_SAT_HALF = 12 * 60;    // 12:00 = 720
 
 // ★ v1.5: OT day = 06:00 ถึง 06:00 ของวันถัดไป (24 ชม.)
 const OT_DAY_START_MIN = 6 * 60;                  // 06:00 = 360
@@ -170,18 +172,19 @@ app.get("/api/employees", async (req, res) => {
 
 // ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
 app.post("/api/employees", async (req, res) => {
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
   try {
     const sheets = await getSheetsClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: "Employees!A:G",
+      range: "Employees!A:H",  // ★ v1.27
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
         Number(outProvinceFlat) || 0,
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
+        satHalfDay ? "TRUE" : "",  // ★ v1.27
       ]] },
     });
     res.json({ ok: true });
@@ -193,18 +196,19 @@ app.post("/api/employees", async (req, res) => {
 // ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
 app.put("/api/employees/:idx", async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
   try {
     const sheets = await getSheetsClient();
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Employees!A${row}:G${row}`,
+      range: `Employees!A${row}:H${row}`,  // ★ v1.27
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
         Number(outProvinceFlat) || 0,
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
+        satHalfDay ? "TRUE" : "",  // ★ v1.27
       ]] },
     });
     res.json({ ok: true });
@@ -327,9 +331,11 @@ app.post("/api/ot", async (req, res) => {
     const hours = calcHours(startTime, endTime);
     if (hours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเวลาเริ่มต้น" });
 
-    // ★ v1.6: ลงเวลาได้ทุกช่วง (รวม 01:00-04:00 = OT คืนวันนั้น) ห้ามแค่ทับเวลางาน 08:30–17:30
-    if (overlapsWorkHours(startTime, endTime)) {
-      return res.status(400).json({ error: "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
+    // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางานปกติ
+    // ★ v1.27: เสาร์ครึ่งวัน → window 08:30-12:00
+    const workEndMin = getWorkEndForEmp(emp, dow);
+    if (overlapsWorkHours(startTime, endTime, workEndMin)) {
+      return res.status(400).json({ error: `ช่วง ${workWindowLabel(workEndMin)} เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้` });
     }
 
     // ★ v1.21: ห้ามบันทึกทับกับ record ในวันเดียวกัน
@@ -791,9 +797,16 @@ app.post("/api/edit-requests/:idx/apply", async (req, res) => {
       if (!newStartTime || !newEndTime || !newTask) {
         return res.status(400).json({ error: "กรุณากรอก เริ่ม, สิ้นสุด, งาน" });
       }
+      // ★ v1.27: ใช้ window per-employee (เสาร์ครึ่งวัน)
+      const employeesForCheck = await getEmployees(sheets);
+      const empForCheck = employeesForCheck.find(e => e.name === reqName);
+      const editDate = newDate || target.date;
+      const [eDD, eMM, eYY] = editDate.split("/").map(Number);
+      const eDow = new Date(eYY - 543, eMM - 1, eDD).getDay();
+      const editWorkEnd = getWorkEndForEmp(empForCheck, eDow);
       // Validate
-      if (overlapsWorkHours(newStartTime, newEndTime)) {
-        return res.status(400).json({ error: "ช่วงเวลาใหม่ทับเวลางานปกติ 08:30–17:30" });
+      if (overlapsWorkHours(newStartTime, newEndTime, editWorkEnd)) {
+        return res.status(400).json({ error: `ช่วงเวลาใหม่ทับเวลางานปกติ ${workWindowLabel(editWorkEnd)}` });
       }
       const newHours = calcHours(newStartTime, newEndTime);
       if (newHours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเริ่มต้น" });
@@ -1175,7 +1188,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.26)"));
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.27)"));
 
 // ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
 app.get("/liff", (_, res) => {
@@ -1192,7 +1205,7 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:G500",  // ★ v1.25: เพิ่ม column E (ต่างจังหวัด), F (ค่าเดินทาง), G (ประกันสังคม)
+    range: "Employees!A3:H500",  // ★ v1.27: เพิ่ม column H (เสาร์ครึ่งวัน)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
@@ -1203,6 +1216,7 @@ async function getEmployees(sheets) {
     outProvinceFlat: Number(row[4]) || 0,    // ★ v1.25
     travelAllowance: Number(row[5]) || 0,    // ★ v1.25 (รายเดือน)
     socialSecurity:  Number(row[6]) || 0,    // ★ v1.25 (รายเดือน หัก)
+    satHalfDay:      String(row[7] || "").toUpperCase() === "TRUE" || row[7] === true || row[7] === "1",  // ★ v1.27
   })).filter(e => e.name);
 }
 
@@ -1322,16 +1336,29 @@ function calcHours(start, end) {
 }
 
 // ★ v1.3+v1.4: เช็คว่า OT ช่วงเวลานี้ทับเวลางานปกติ (08:30–17:30) — รองรับข้ามวัน
-function overlapsWorkHours(startTime, endTime) {
+// ★ v1.27: รับ workEndMin ปรับได้ (เช่น เสาร์ครึ่งวัน → 12:00)
+function overlapsWorkHours(startTime, endTime, workEndMin = WORK_END_MIN) {
   const [sh, sm] = startTime.split(":").map(Number);
   const [eh, em] = endTime.split(":").map(Number);
   let s = sh * 60 + sm;
   let e = eh * 60 + em;
   if (e < s) e += 24 * 60; // ข้ามวัน
   // ตรวจทับเวลางานทั้งวันแรก และวันถัดไป (กรณี OT ข้ามวัน)
-  const day1 = s < WORK_END_MIN          && e > WORK_START_MIN;
-  const day2 = s < WORK_END_MIN + 1440   && e > WORK_START_MIN + 1440;
+  const day1 = s < workEndMin          && e > WORK_START_MIN;
+  const day2 = s < workEndMin + 1440   && e > WORK_START_MIN + 1440;
   return day1 || day2;
+}
+
+// ★ v1.27: คำนวณ workEndMin ตามพนักงาน + วัน (เสาร์ครึ่งวัน → 12:00)
+function getWorkEndForEmp(emp, dow) {
+  if (emp && emp.satHalfDay && dow === 6) return WORK_END_MIN_SAT_HALF;
+  return WORK_END_MIN;
+}
+// label สำหรับแสดง error
+function workWindowLabel(workEndMin) {
+  const eh = Math.floor(workEndMin / 60);
+  const em = workEndMin % 60;
+  return `08:30–${String(eh).padStart(2,"0")}:${String(em).padStart(2,"0")}`;
 }
 
 // ★ v1.5: เช็คว่า OT อยู่ในช่วง OT day (06:00 ถึง 06:00 ถัดไป) หรือเปล่า
@@ -1439,9 +1466,11 @@ async function handleBotEvent(event) {
     const already  = await getDayHours(sheets, empData.name, todayDate);
     if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
 
-    // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางาน 08:30–17:30
-    if (overlapsWorkHours(startTime, endTime)) {
-      return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
+    // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางาน
+    // ★ v1.27: เสาร์ครึ่งวัน → window 08:30-12:00
+    const botWorkEnd = getWorkEndForEmp(empData, todayDow);
+    if (overlapsWorkHours(startTime, endTime, botWorkEnd)) {
+      return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ช่วง ${workWindowLabel(botWorkEnd)} เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้` });
     }
 
     // ★ v1.21: ห้ามทับกับ record ในวันเดียวกัน
