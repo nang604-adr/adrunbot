@@ -16,7 +16,63 @@ const line       = require("@line/bot-sdk");
 const { google } = require("googleapis");
 const path       = require("path");
 const crypto     = require("crypto");
-const XLSX       = require("xlsx");
+// ★ v1.28: ใช้ xlsx-js-style (drop-in replacement ของ xlsx ที่รองรับ border + alignment)
+const XLSX       = require("xlsx-js-style");
+
+// ★ v1.28: helper — ใส่ border + center alignment ให้ทุก cell ใน worksheet
+//   - แถวแรก (header): bg เขียว + text ขาว + bold
+//   - cell อื่น ๆ: border บาง + center
+function styleSheet(ws, opts = {}) {
+  if (!ws || !ws["!ref"]) return ws;
+  const range = XLSX.utils.decode_range(ws["!ref"]);
+  const headerRowIdx = opts.headerRow !== undefined ? opts.headerRow : 0; // default = แถว 0
+  const titleRowIdx  = opts.titleRow;  // optional — แถวชื่อรายงาน (merge cells)
+  const thinBorder = {
+    top:    { style: "thin", color: { rgb: "888888" } },
+    bottom: { style: "thin", color: { rgb: "888888" } },
+    left:   { style: "thin", color: { rgb: "888888" } },
+    right:  { style: "thin", color: { rgb: "888888" } },
+  };
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cellRef = XLSX.utils.encode_cell({ r: R, c: C });
+      const cell = ws[cellRef];
+      if (!cell) continue; // ข้าม cell ว่าง (ไม่ใส่ border)
+      const isHeader = R === headerRowIdx;
+      const isTitle  = R === titleRowIdx;
+      const isNumber = typeof cell.v === "number";
+      cell.s = {
+        font: {
+          name: "TH SarabunPSK",
+          sz: isTitle ? 16 : (isHeader ? 12 : 11),
+          bold: isHeader || isTitle,
+          color: { rgb: isHeader ? "FFFFFF" : "222222" },
+        },
+        alignment: {
+          horizontal: isTitle ? "center" : (isNumber ? "center" : "center"),
+          vertical: "center",
+          wrapText: true,
+        },
+        border: thinBorder,
+        fill: isHeader
+          ? { patternType: "solid", fgColor: { rgb: "2E7D32" } }     // เขียวเข้ม
+          : isTitle
+            ? { patternType: "solid", fgColor: { rgb: "E8F5E9" } }   // เขียวอ่อน
+            : { patternType: "solid", fgColor: { rgb: "FFFFFF" } },
+      };
+      // number format
+      if (isNumber && !isHeader && !isTitle) {
+        cell.z = "#,##0";
+      }
+    }
+  }
+  // row heights
+  ws["!rows"] = ws["!rows"] || [];
+  for (let R = range.s.r; R <= range.e.r; R++) {
+    ws["!rows"][R] = { hpt: R === titleRowIdx ? 26 : 22 };
+  }
+  return ws;
+}
 
 // ── LINE Config ──────────────────────────────────────────────
 const lineConfig = {
@@ -961,7 +1017,10 @@ app.get("/api/export/monthly", async (req, res) => {
       summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
+    // merge title row across columns
+    ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }];
+    styleSheet(ws1, { titleRow: 0, headerRow: 2 });
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
 
     // ── Details ──
@@ -976,7 +1035,8 @@ app.get("/api/export/monthly", async (req, res) => {
       ]);
     });
     const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
-    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:14}];
+    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:28},{wch:16},{wch:18},{wch:12},{wch:14}];
+    styleSheet(ws2, { headerRow: 0 });
     XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
 
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
@@ -1064,7 +1124,12 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
+    // merge title + meta rows
+    ws1["!merges"] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },  // title
+    ];
+    styleSheet(ws1, { titleRow: 0, headerRow: 4 });
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
 
     // ── ★ v1.26: Per-employee sheets (1 sheet per คน แบบตัวอย่าง) ──
@@ -1150,8 +1215,14 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
 
       const wsEmp = XLSX.utils.aoa_to_sheet(rows);
       wsEmp["!cols"] = [
-        {wch:12},{wch:5},{wch:28},{wch:14},{wch:14},{wch:10},{wch:8},{wch:18},{wch:12},
+        {wch:12},{wch:6},{wch:30},{wch:16},{wch:14},{wch:10},{wch:8},{wch:20},{wch:14},
       ];
+      // merge title row + meta row
+      wsEmp["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },  // ใบรายการ OT — ชื่อ
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 8 } },  // รอบจ่าย
+      ];
+      styleSheet(wsEmp, { titleRow: 0, headerRow: 3 });
 
       // unique sheet name
       let sname = safeSheetName(emp.name);
@@ -1175,7 +1246,8 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       ]);
     });
     const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
-    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20}];
+    ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:28},{wch:16},{wch:18},{wch:12},{wch:20}];
+    styleSheet(ws2, { headerRow: 0 });
     XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียดทั้งหมด");
 
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
@@ -1188,7 +1260,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.27)"));
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.28)"));
 
 // ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
 app.get("/liff", (_, res) => {
