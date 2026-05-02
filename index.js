@@ -308,6 +308,14 @@ app.post("/api/ot", async (req, res) => {
       return res.status(400).json({ error: "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
     }
 
+    // ★ v1.21: ห้ามบันทึกทับกับ record ในวันเดียวกัน
+    const overlap = await findOverlappingRecord(sheets, name, date, startTime, endTime);
+    if (overlap) {
+      return res.status(400).json({
+        error: `ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime} (${overlap.hours} ชม.) ในวันเดียวกัน — ใช้ปุ่ม 🔧 ขอแก้ไขแทน`,
+      });
+    }
+
     // ★ v1.2: บันทึกเวลาตามจริง แต่คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
     const alreadyDay        = await getDayHours(sheets, name, date);
     const remainingPayable  = Math.max(0, MAX_OT_PER_DAY - alreadyDay);
@@ -902,6 +910,39 @@ async function getDayHours(sheets, name, date) {
             .reduce((s, r) => s + r.hours, 0);
 }
 
+// ★ v1.21: ตรวจช่วงเวลาทับกับ record อื่นในวันเดียวกัน (เฉพาะ active = ยังไม่ undone)
+async function findOverlappingRecord(sheets, name, date, newStart, newEnd) {
+  const all = await getAllRecords(sheets);
+  const sameDay = all.filter(r =>
+    r.name === name &&
+    r.date === date &&
+    r.otType === "วันธรรมดา" &&
+    r.startTime !== "-" && r.endTime !== "-"
+  );
+
+  // Convert ใหม่เป็น minutes
+  const toMin = t => {
+    const [h, m] = t.split(":").map(Number);
+    return h * 60 + m;
+  };
+  let nS = toMin(newStart);
+  let nE = toMin(newEnd);
+  if (nE < nS) nE += 1440; // cross-midnight
+
+  for (const r of sameDay) {
+    let s = toMin(r.startTime);
+    let e = toMin(r.endTime);
+    if (e < s) e += 1440;
+    // Ranges overlap iff nS < e && s < nE (also ลองเปรียบเทียบกับ +1440 และ -1440)
+    if ((nS < e && s < nE) ||
+        (nS + 1440 < e && s < nE + 1440) ||
+        (nS - 1440 < e && s < nE - 1440)) {
+      return r;
+    }
+  }
+  return null;
+}
+
 async function saveRecord(sheets, data) {
   const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
   await sheets.spreadsheets.values.append({
@@ -1070,6 +1111,12 @@ async function handleBotEvent(event) {
     // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางาน 08:30–17:30
     if (overlapsWorkHours(startTime, endTime)) {
       return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้" });
+    }
+
+    // ★ v1.21: ห้ามทับกับ record ในวันเดียวกัน
+    const overlap = await findOverlappingRecord(sheets, empData.name, todayDate, startTime, endTime);
+    if (overlap) {
+      return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime} (${overlap.hours} ชม.) ในวันเดียวกัน` });
     }
 
     // ★ v1.2: ลงเวลาตามจริง คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
