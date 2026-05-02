@@ -1082,8 +1082,8 @@ async function handleBotEvent(event) {
     await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
 
     const replyText = payableHours < hours
-      ? `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime}\n📊 ทำจริง ${hours}ชม. · คิดเงิน ${payableHours}ชม. (${pay}฿)\n📝 ${task||"-"}\n📅 ${todayDate}`
-      : `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม. · ${pay}฿)\n📝 ${task||"-"}\n📅 ${todayDate}`;
+      ? `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime}\n📊 ทำจริง ${hours}ชม. · คิด ${payableHours}ชม.\n📝 ${task||"-"}\n📅 ${todayDate}`
+      : `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${task||"-"}\n📅 ${todayDate}`;
     return client.replyMessage(event.replyToken, { type:"text", text: replyText });
 
   } catch (err) {

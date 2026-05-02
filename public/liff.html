@@ -850,12 +850,10 @@ async function submitOT() {
     const data = await res.json();
     if (!res.ok) return showErr(errBox, data.error || "เกิดข้อผิดพลาด");
 
-    // ★ v1.2: ถ้าโดน cap → แจ้งให้ user รู้
+    // ★ v1.20: ไม่แสดงยอดเงินใน toast (เห็นแค่ Admin เท่านั้น)
     let msg = "✅ บันทึก OT สำเร็จ!";
     if (data.capped) {
-      msg = `✅ บันทึกแล้ว · ทำ ${data.hours}ชม. คิดเงิน ${data.payableHours}ชม. (${data.pay}฿)`;
-    } else if (data.pay) {
-      msg = `✅ บันทึก OT สำเร็จ! (${data.pay}฿)`;
+      msg = `✅ บันทึกแล้ว · ทำ ${data.hours}ชม. คิดเงิน ${data.payableHours}ชม.`;
     }
     toast(msg, "ok");
     document.getElementById("taskInput").value = "";
