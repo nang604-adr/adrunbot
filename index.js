@@ -674,12 +674,11 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
 });
 
 // ★ v1.22: POST /api/edit-requests/:idx/apply — อนุมัติ + แก้ record จริง
+// ★ v1.22.1: รองรับทั้ง weekday + holiday + delete record
 app.post("/api/edit-requests/:idx/apply", async (req, res) => {
   const reqIdx = Number(req.params.idx);
-  const { newStartTime, newEndTime, newTask, newLocation } = req.body;
-  if (!newStartTime || !newEndTime || !newTask) {
-    return res.status(400).json({ error: "ข้อมูลใหม่ไม่ครบ (เริ่ม, สิ้นสุด, งาน)" });
-  }
+  const { action, newStartTime, newEndTime, newTask, newLocation, newDate } = req.body;
+  // action: "edit" (default) | "delete"
   try {
     const sheets = await getSheetsClient();
 
@@ -701,13 +700,11 @@ app.post("/api/edit-requests/:idx/apply", async (req, res) => {
 
     // 2. Find target record
     const all = await getAllRecords(sheets);
-    const candidates = all.filter(r =>
-      r.name === reqName && r.date === reqDate && r.otType === "วันธรรมดา"
-    );
+    const candidates = all.filter(r => r.name === reqName && r.date === reqDate);
     if (candidates.length === 0) {
-      return res.status(400).json({ error: `ไม่พบ record วันธรรมดาของ ${reqName} วันที่ ${reqDate}` });
+      return res.status(400).json({ error: `ไม่พบ record ของ ${reqName} วันที่ ${reqDate}` });
     }
-    // Match by old startTime in recordDesc (if multiple)
+    // Match by old startTime in recordDesc (if multiple weekday)
     const timeMatch = reqDesc.match(/(\d{2}:\d{2})/);
     let target = (timeMatch && candidates.length > 1)
       ? candidates.find(r => r.startTime === timeMatch[1])
@@ -718,52 +715,102 @@ app.post("/api/edit-requests/:idx/apply", async (req, res) => {
       return res.status(400).json({ error: `รายการนี้จ่ายไปแล้ว (รอบ ${target.paidAt}) แก้ไม่ได้` });
     }
 
-    // 3. Validate new values
-    if (overlapsWorkHours(newStartTime, newEndTime)) {
-      return res.status(400).json({ error: "ช่วงเวลาใหม่ทับเวลางานปกติ 08:30–17:30" });
-    }
-    const newHours = calcHours(newStartTime, newEndTime);
-    if (newHours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเริ่มต้น" });
+    const isWeekday = target.otType === "วันธรรมดา";
 
-    // 4. Check overlap with OTHER same-day records (skip target itself)
-    const others = all.filter(r =>
-      r.name === reqName && r.date === reqDate &&
-      r.otType === "วันธรรมดา" && r.idx !== target.idx &&
-      r.startTime !== "-" && r.endTime !== "-"
-    );
-    const toMin = t => { const [h,m] = t.split(":").map(Number); return h*60+m; };
-    let nS = toMin(newStartTime), nE = toMin(newEndTime);
-    if (nE < nS) nE += 1440;
-    for (const r of others) {
-      let s = toMin(r.startTime), e = toMin(r.endTime);
-      if (e < s) e += 1440;
-      if (nS < e && s < nE) {
-        return res.status(400).json({ error: `ช่วงใหม่ ${newStartTime}-${newEndTime} ทับกับรายการอื่น ${r.startTime}-${r.endTime}` });
+    // ── DELETE action ──
+    if (action === "delete") {
+      const targetRow = idxToRow(target.idx);
+      await deleteRow(sheets, "OT_Records", targetRow);
+      // Mark Edit_Request as approved
+      // หลัง delete row → idx ของ Edit_Requests อาจไม่ถูกเปลี่ยน (เป็นคนละ tab)
+      const reqRowSheet = idxToRow(reqIdx);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `Edit_Requests!E${reqRowSheet}`,
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [["อนุมัติแล้ว (ลบ)"]] },
+      });
+      return res.json({ ok: true, deleted: true });
+    }
+
+    // ── EDIT action (default) ──
+    if (isWeekday) {
+      if (!newStartTime || !newEndTime || !newTask) {
+        return res.status(400).json({ error: "กรุณากรอก เริ่ม, สิ้นสุด, งาน" });
       }
+      // Validate
+      if (overlapsWorkHours(newStartTime, newEndTime)) {
+        return res.status(400).json({ error: "ช่วงเวลาใหม่ทับเวลางานปกติ 08:30–17:30" });
+      }
+      const newHours = calcHours(newStartTime, newEndTime);
+      if (newHours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเริ่มต้น" });
+
+      // Check overlap with OTHER same-day records (skip target itself)
+      const others = all.filter(r =>
+        r.name === reqName && r.date === reqDate &&
+        r.otType === "วันธรรมดา" && r.idx !== target.idx &&
+        r.startTime !== "-" && r.endTime !== "-"
+      );
+      const toMin = t => { const [h,m] = t.split(":").map(Number); return h*60+m; };
+      let nS = toMin(newStartTime), nE = toMin(newEndTime);
+      if (nE < nS) nE += 1440;
+      for (const r of others) {
+        let s = toMin(r.startTime), e = toMin(r.endTime);
+        if (e < s) e += 1440;
+        if (nS < e && s < nE) {
+          return res.status(400).json({ error: `ช่วงใหม่ ${newStartTime}-${newEndTime} ทับกับรายการอื่น ${r.startTime}-${r.endTime}` });
+        }
+      }
+
+      // Recalc pay
+      const employees = await getEmployees(sheets);
+      const emp = employees.find(e => e.name === reqName);
+      if (!emp) return res.status(400).json({ error: `ไม่พบพนักงาน ${reqName}` });
+      const otherHours = others.reduce((s, r) => s + r.hours, 0);
+      const remainingPayable = Math.max(0, MAX_OT_PER_DAY - otherHours);
+      const payableHours = Math.min(newHours, remainingPayable);
+      const newPay = Math.round(payableHours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
+
+      // Update OT_Records row (B-I: date, startTime, endTime, hours, task, location, otType, pay)
+      const targetRow = idxToRow(target.idx);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `OT_Records!B${targetRow}:I${targetRow}`,
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [[
+          newDate || target.date,
+          newStartTime, newEndTime, newHours,
+          newTask, newLocation || "", "วันธรรมดา", newPay,
+        ]] },
+      });
+
+      // Mark approved
+      const reqRowSheet = idxToRow(reqIdx);
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `Edit_Requests!E${reqRowSheet}`,
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [["อนุมัติแล้ว"]] },
+      });
+
+      return res.json({ ok: true, newHours, payableHours, newPay, capped: payableHours < newHours });
     }
 
-    // 5. Recalc pay (cap 5 ชม./วัน รวมทุก record)
-    const employees = await getEmployees(sheets);
-    const emp = employees.find(e => e.name === reqName);
-    if (!emp) return res.status(400).json({ error: `ไม่พบพนักงาน ${reqName}` });
-    const otherHours = others.reduce((s, r) => s + r.hours, 0);
-    const remainingPayable = Math.max(0, MAX_OT_PER_DAY - otherHours);
-    const payableHours = Math.min(newHours, remainingPayable);
-    const newPay = Math.round(payableHours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
+    // ── HOLIDAY record edit (just task/location/date) ──
+    if (!newTask) return res.status(400).json({ error: "กรุณากรอกงานที่ทำ" });
 
-    // 6. Update OT_Records row (C-I: startTime, endTime, hours, task, location, otType, pay)
     const targetRow = idxToRow(target.idx);
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `OT_Records!C${targetRow}:I${targetRow}`,
+      range: `OT_Records!B${targetRow}:I${targetRow}`,
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
-        newStartTime, newEndTime, newHours,
-        newTask, newLocation || "", "วันธรรมดา", newPay,
+        newDate || target.date,
+        "-", "-", 0,
+        newTask, newLocation || "", target.otType, target.pay,
       ]] },
     });
 
-    // 7. Mark Edit_Request as approved
     const reqRowSheet = idxToRow(reqIdx);
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
@@ -772,11 +819,7 @@ app.post("/api/edit-requests/:idx/apply", async (req, res) => {
       resource: { values: [["อนุมัติแล้ว"]] },
     });
 
-    res.json({
-      ok: true,
-      newHours, payableHours, newPay,
-      capped: payableHours < newHours,
-    });
+    return res.json({ ok: true, holiday: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

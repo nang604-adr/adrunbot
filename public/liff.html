@@ -1542,7 +1542,7 @@ function renderAdminRequests() {
   document.getElementById("admin-requests").innerHTML = html;
 }
 
-// ★ v1.22: เปิด modal อนุมัติ + แก้ไข OT
+// ★ v1.22.1: เปิด modal อนุมัติ + แก้ไข OT (รองรับทั้ง weekday + holiday + delete)
 async function openEditApproval(reqIdx) {
   const req = adminRequests.find(r => r.idx === reqIdx);
   if (!req) return toast("ไม่พบคำขอ", "err");
@@ -1553,13 +1553,13 @@ async function openEditApproval(reqIdx) {
   try {
     const res = await fetch(`/api/records?name=${encodeURIComponent(req.name)}&month=${mm}&year=${yy}`);
     const data = await res.json();
-    records = (data.records || []).filter(r => r.date === req.date && r.otType === "วันธรรมดา" && r.startTime !== "-");
+    records = (data.records || []).filter(r => r.date === req.date);
   } catch (e) {
     return toast("โหลด record ไม่ได้", "err");
   }
 
   if (records.length === 0) {
-    return toast(`ไม่พบ record วันธรรมดาของ ${req.name} วันที่ ${req.date}`, "err");
+    return toast(`ไม่พบ record ของ ${req.name} วันที่ ${req.date}`, "err");
   }
 
   // Match record from recordDesc (use first if can't match)
@@ -1573,19 +1573,35 @@ async function openEditApproval(reqIdx) {
     return toast(`รายการนี้จ่ายไปแล้ว (${target.paidAt}) — แก้ไม่ได้`, "err");
   }
 
+  const isWeekday = target.otType === "วันธรรมดา";
+  const oldDescStr = isWeekday
+    ? `${target.startTime}–${target.endTime} (${target.hours} ชม.)`
+    : `🌅 ${target.otType}`;
+
+  // Time inputs (เฉพาะ weekday)
+  const timeInputs = isWeekday ? `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+      <div><label>เวลาเริ่ม</label><input type="time" id="apvStart" value="${target.startTime}"></div>
+      <div><label>เวลาสิ้นสุด</label><input type="time" id="apvEnd" value="${target.endTime}"></div>
+    </div>
+  ` : `
+    <div style="background:rgba(255,213,79,.1);border:1px solid rgba(255,213,79,.2);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:11px;color:#ffd54f">🌅 รายการนี้เป็นวันหยุด — แก้ได้แค่ วันที่ / งาน / สถานที่ (เวลาเป็นเหมาจ่าย)</div>
+  `;
+
   openModal("✅ อนุมัติ + แก้ไข OT", `
     <div style="font-size:13px;font-weight:700;margin-bottom:6px">👤 ${req.name} · ${req.date}</div>
     <div style="background:rgba(255,167,38,.1);border:1px solid rgba(255,167,38,.2);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;color:#ffe082;line-height:1.6">💬 "${req.note}"</div>
     <div style="background:#141829;border-radius:8px;padding:8px 10px;margin-bottom:14px">
       <div style="font-size:10px;color:var(--sub);margin-bottom:3px">📋 รายการเดิม:</div>
-      <div style="font-size:12px;color:var(--text)">${target.startTime}–${target.endTime} (${target.hours} ชม.) · ${target.task||"-"}${target.location?" · 📍"+target.location:""}</div>
+      <div style="font-size:12px;color:var(--text)">${oldDescStr} · ${target.task||"-"}${target.location?" · 📍"+target.location:""}</div>
     </div>
 
     <div style="font-size:11px;color:var(--sub);margin-bottom:6px">✏️ แก้ไขข้อมูลใหม่:</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-      <div><label>เวลาเริ่ม</label><input type="time" id="apvStart" value="${target.startTime}"></div>
-      <div><label>เวลาสิ้นสุด</label><input type="time" id="apvEnd" value="${target.endTime}"></div>
+    <div style="margin-bottom:10px">
+      <label>📅 วันที่ (DD/MM/YYYY พ.ศ.) — ปล่อยว่างถ้าไม่เปลี่ยน</label>
+      <input type="text" id="apvDate" value="${target.date}" maxlength="10" oninput="formatThaiDate(this)">
     </div>
+    ${timeInputs}
     <div style="margin-bottom:10px">
       <label>📝 งานที่ทำ</label>
       <input type="text" id="apvTask" value="${(target.task||'').replace(/"/g,'&quot;')}">
@@ -1595,37 +1611,49 @@ async function openEditApproval(reqIdx) {
       <input type="text" id="apvLoc" value="${(target.location||'').replace(/"/g,'&quot;')}">
     </div>
 
-    <button class="btn btn-green" onclick="applyEditApproval(${reqIdx})">✅ อนุมัติ + บันทึกการแก้ไข</button>
+    <button class="btn btn-green" onclick="applyEditApproval(${reqIdx},'edit',${isWeekday})">✅ อนุมัติ + บันทึกการแก้ไข</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-red" onclick="if(confirm('ลบรายการนี้?\\nไม่สามารถกู้คืนได้')){applyEditApproval(${reqIdx},'delete',${isWeekday})}">🗑️ อนุมัติ + ลบรายการ</button>
     <div style="height:8px"></div>
     <button class="btn btn-grey" onclick="closeModal()">← ยกเลิก</button>
   `);
 }
 
-async function applyEditApproval(reqIdx) {
-  const newStart = document.getElementById("apvStart").value;
-  const newEnd   = document.getElementById("apvEnd").value;
-  const newTask  = document.getElementById("apvTask").value.trim();
-  const newLoc   = document.getElementById("apvLoc").value.trim();
+async function applyEditApproval(reqIdx, action, isWeekday) {
+  const body = { action };
 
-  if (!newStart || !newEnd) return toast("กรุณากรอกเวลาเริ่ม/สิ้นสุด", "err");
-  if (!newTask) return toast("กรุณากรอกงานที่ทำ", "err");
+  if (action === "edit") {
+    const newDate = (document.getElementById("apvDate")?.value || "").trim();
+    const newTask = (document.getElementById("apvTask")?.value || "").trim();
+    const newLoc  = (document.getElementById("apvLoc")?.value || "").trim();
+    if (!newTask) return toast("กรุณากรอกงานที่ทำ", "err");
+    body.newDate = newDate;
+    body.newTask = newTask;
+    body.newLocation = newLoc;
+    if (isWeekday) {
+      const newStart = document.getElementById("apvStart").value;
+      const newEnd   = document.getElementById("apvEnd").value;
+      if (!newStart || !newEnd) return toast("กรุณากรอกเวลาเริ่ม/สิ้นสุด", "err");
+      body.newStartTime = newStart;
+      body.newEndTime = newEnd;
+    }
+  }
 
   try {
     const res = await fetch(`/api/edit-requests/${reqIdx}/apply`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        newStartTime: newStart, newEndTime: newEnd,
-        newTask, newLocation: newLoc,
-      }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!res.ok) return toast(data.error || "ไม่สำเร็จ", "err");
 
     closeModal();
-    const msg = data.capped
-      ? `✅ อนุมัติแล้ว — แก้เป็น ${data.newHours}ชม. (คิด ${data.payableHours}ชม.)`
-      : `✅ อนุมัติแล้ว — แก้เป็น ${data.newHours}ชม.`;
+    let msg;
+    if (data.deleted) msg = "✅ อนุมัติ + ลบรายการแล้ว";
+    else if (data.holiday) msg = "✅ อนุมัติ + แก้ไขวันหยุดแล้ว";
+    else if (data.capped) msg = `✅ อนุมัติแล้ว — แก้เป็น ${data.newHours}ชม. (คิด ${data.payableHours}ชม.)`;
+    else msg = `✅ อนุมัติแล้ว — แก้เป็น ${data.newHours}ชม.`;
     toast(msg, "ok");
     await loadAdmin();
   } catch (e) {
