@@ -170,14 +170,19 @@ app.get("/api/employees", async (req, res) => {
 
 // ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
 app.post("/api/employees", async (req, res) => {
-  const { name, hourlyRate, holidayFlat, userId } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity } = req.body;
   try {
     const sheets = await getSheetsClient();
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: "Employees!A:D",
+      range: "Employees!A:G",
       valueInputOption: "USER_ENTERED",
-      resource: { values: [[name, hourlyRate, holidayFlat, userId || ""]] },
+      resource: { values: [[
+        name, hourlyRate, holidayFlat, userId || "",
+        Number(outProvinceFlat) || 0,
+        Number(travelAllowance) || 0,
+        Number(socialSecurity) || 0,
+      ]] },
     });
     res.json({ ok: true });
   } catch (e) {
@@ -188,14 +193,19 @@ app.post("/api/employees", async (req, res) => {
 // ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
 app.put("/api/employees/:idx", async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
-  const { name, hourlyRate, holidayFlat, userId } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity } = req.body;
   try {
     const sheets = await getSheetsClient();
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Employees!A${row}:D${row}`,
+      range: `Employees!A${row}:G${row}`,
       valueInputOption: "USER_ENTERED",
-      resource: { values: [[name, hourlyRate, holidayFlat, userId || ""]] },
+      resource: { values: [[
+        name, hourlyRate, holidayFlat, userId || "",
+        Number(outProvinceFlat) || 0,
+        Number(travelAllowance) || 0,
+        Number(socialSecurity) || 0,
+      ]] },
     });
     res.json({ ok: true });
   } catch (e) {
@@ -290,6 +300,20 @@ app.post("/api/ot", async (req, res) => {
     const isHolDate = holidays.some(h => h.date === date);
     const isSun     = dow === 0;
     const isHoliday = otType === "holiday" || isHolDate || isSun;
+
+    // ★ v1.25: ทำงานต่างจังหวัด (ค้างคืน) — ไม่ต้องใส่เวลา
+    if (otType === "outProvince") {
+      // ถ้าวันนั้นเป็นวันหยุด/อาทิตย์ → ใช้ holidayFlat (ตามที่ user ระบุ)
+      const useFlat = isHoliday ? emp.holidayFlat : emp.outProvinceFlat;
+      const typeLabel = isHoliday
+        ? (isSun ? "ต่างจังหวัด+อาทิตย์" : "ต่างจังหวัด+วันหยุด")
+        : "ต่างจังหวัด";
+      await saveRecord(sheets, {
+        name, date, startTime: "-", endTime: "-", hours: 0,
+        task, location, otType: typeLabel, pay: useFlat,
+      });
+      return res.json({ ok: true, hours: 0, pay: useFlat, otType: typeLabel });
+    }
 
     if (isHoliday) {
       const typeLabel = isSun ? "วันอาทิตย์" : isHolDate ? "วันหยุดนักขัตฤกษ์" : "วันหยุด";
@@ -421,7 +445,11 @@ app.get("/api/payroll/preview", async (req, res) => {
     const pending = all.filter(r => !r.paidAt && r.name && r.date && isOnOrBeforeCutoff(r.date, cutoff));
     const carry   = all.filter(r => !r.paidAt && r.name && r.date && !isOnOrBeforeCutoff(r.date, cutoff));
 
-    // group by employee
+    // group by employee + ดึง travelAllowance/socialSecurity จาก Employees
+    const employees = await getEmployees(sheets);
+    const empMap = {};
+    employees.forEach(e => empMap[e.name] = e);
+
     const byEmp = {};
     pending.forEach(r => {
       byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
@@ -431,15 +459,26 @@ app.get("/api/payroll/preview", async (req, res) => {
       if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
       else                          byEmp[r.name].holidays += 1;
     });
-    const summary = Object.values(byEmp).map(e => ({
-      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
-      holidays: e.holidays, pay: e.pay, count: e.count,
-    })).sort((a,b) => b.pay - a.pay);
+    // ★ v1.25: เพิ่ม travelAllowance + หัก socialSecurity (รายเดือน — รวมในรอบจ่าย)
+    const summary = Object.values(byEmp).map(e => {
+      const empData = empMap[e.name] || {};
+      const travel = empData.travelAllowance || 0;
+      const social = empData.socialSecurity || 0;
+      const netPay = e.pay + travel - social;
+      return {
+        name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+        holidays: e.holidays, pay: e.pay, count: e.count,
+        travel, social, netPay,
+      };
+    }).sort((a,b) => b.netPay - a.netPay);
 
     const totals = {
       records: pending.length,
       employees: summary.length,
       totalPay: summary.reduce((s,e) => s+e.pay, 0),
+      totalTravel: summary.reduce((s,e) => s+e.travel, 0),
+      totalSocial: summary.reduce((s,e) => s+e.social, 0),
+      totalNet: summary.reduce((s,e) => s+e.netPay, 0),
       totalHours: +pending.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0).toFixed(2),
       totalHolidays: pending.filter(r=>r.otType!=="วันธรรมดา").length,
     };
@@ -491,9 +530,20 @@ app.post("/api/payroll/commit", async (req, res) => {
       },
     });
 
-    // คำนวณยอด
-    const employees = new Set(pending.map(r => r.name));
-    const totalPay  = pending.reduce((s,r) => s+r.pay, 0);
+    // คำนวณยอด (รวม travel allowance + หัก social security)
+    const employeeNames = new Set(pending.map(r => r.name));
+    const grossOT  = pending.reduce((s,r) => s+r.pay, 0);
+    // ดึงพนักงานเพื่อคำนวณ travel + social
+    const empList = await getEmployees(sheets);
+    let totalTravel = 0, totalSocial = 0;
+    for (const name of employeeNames) {
+      const e = empList.find(x => x.name === name);
+      if (e) {
+        totalTravel += e.travelAllowance || 0;
+        totalSocial += e.socialSecurity || 0;
+      }
+    }
+    const totalPay = grossOT + totalTravel - totalSocial;  // net
 
     // เขียน Payroll_Log (ถ้า tab มีอยู่)
     try {
@@ -503,7 +553,7 @@ app.post("/api/payroll/commit", async (req, res) => {
         valueInputOption: "USER_ENTERED",
         resource: { values: [[
           payId, cutoff, nowStr,
-          pending.length, employees.size, totalPay,
+          pending.length, employeeNames.size, totalPay,
           createdBy || "Admin", "active", "", "",
         ]] },
       });
@@ -517,7 +567,10 @@ app.post("/api/payroll/commit", async (req, res) => {
       cutoff,
       committedAt: nowStr,
       records: pending.length,
-      employees: employees.size,
+      employees: employeeNames.size,
+      grossOT,
+      totalTravel,
+      totalSocial,
       totalPay,
     });
   } catch (e) {
@@ -862,17 +915,27 @@ app.get("/api/export/monthly", async (req, res) => {
       if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
       else                          byEmp[r.name].holidays += 1;
     });
-    const summary = Object.values(byEmp).map(e => ({
-      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
-      holidays: e.holidays, pay: e.pay, count: e.count,
-    })).sort((a,b) => b.pay - a.pay);
+    // ★ v1.25: เพิ่ม travel allowance + social security
+    const empListM = await getEmployees(sheets);
+    const empMapM = {};
+    empListM.forEach(e => empMapM[e.name] = e);
+    const summary = Object.values(byEmp).map(e => {
+      const ed = empMapM[e.name] || {};
+      const travel = ed.travelAllowance || 0;
+      const social = ed.socialSecurity || 0;
+      const netPay = e.pay + travel - social;
+      return { name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+               holidays: e.holidays, pay: e.pay, count: e.count, travel, social, netPay };
+    }).sort((a,b) => b.netPay - a.netPay);
 
     const sumRows = [
       [`สรุป OT — เดือน ${mm}/${yy}` + (employee ? ` — ${employee}` : "")],
       [],
-      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด","ค่า OT (฿)"],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","- ประกันสังคม","สุทธิ (฿)"],
     ];
-    summary.forEach((e, i) => sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay]));
+    summary.forEach((e, i) => sumRows.push([
+      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.social, e.netPay,
+    ]));
     sumRows.push([]);
     sumRows.push([
       "รวมทั้งหมด", "",
@@ -880,9 +943,12 @@ app.get("/api/export/monthly", async (req, res) => {
       +summary.reduce((s,e)=>s+e.hours,0).toFixed(2),
       summary.reduce((s,e)=>s+e.holidays,0),
       summary.reduce((s,e)=>s+e.pay,0),
+      summary.reduce((s,e)=>s+e.travel,0),
+      summary.reduce((s,e)=>s+e.social,0),
+      summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:12},{wch:12},{wch:14}];
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
 
     // ── Details ──
@@ -950,19 +1016,29 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
       else                          byEmp[r.name].holidays += 1;
     });
-    const summary = Object.values(byEmp).map(e => ({
-      name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
-      holidays: e.holidays, pay: e.pay,
-    })).sort((a,b) => b.pay - a.pay);
+    // ★ v1.25: เพิ่ม travelAllowance + หัก socialSecurity ใน summary
+    const empListExp = await getEmployees(sheets);
+    const empMapExp = {};
+    empListExp.forEach(e => empMapExp[e.name] = e);
+    const summary = Object.values(byEmp).map(e => {
+      const ed = empMapExp[e.name] || {};
+      const travel = ed.travelAllowance || 0;
+      const social = ed.socialSecurity || 0;
+      const netPay = e.pay + travel - social;
+      return { name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+               holidays: e.holidays, pay: e.pay, travel, social, netPay };
+    }).sort((a,b) => b.netPay - a.netPay);
 
     const sumRows = [
       ["ใบรายการจ่าย OT"],
       ["รอบจ่าย:", cutoff, "", "Payroll ID:", payId],
       ["จัดทำเมื่อ:", createdAt, "", "ทำโดย:", createdBy],
       [],
-      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด","ค่า OT (฿)"],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","- ประกันสังคม","สุทธิ (฿)"],
     ];
-    summary.forEach((e, i) => sumRows.push([i+1, e.name, e.days, e.hours, e.holidays, e.pay]));
+    summary.forEach((e, i) => sumRows.push([
+      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.social, e.netPay,
+    ]));
     sumRows.push([]);
     sumRows.push([
       "รวมทั้งหมด", "",
@@ -970,9 +1046,12 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
       +summary.reduce((s,e)=>s+e.hours,0).toFixed(2),
       summary.reduce((s,e)=>s+e.holidays,0),
       summary.reduce((s,e)=>s+e.pay,0),
+      summary.reduce((s,e)=>s+e.travel,0),
+      summary.reduce((s,e)=>s+e.social,0),
+      summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:20},{wch:12},{wch:12},{wch:12},{wch:14}];
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
 
     // Details
@@ -1016,14 +1095,17 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:D500",  // ★ v1.14: ขยายจาก 200 → 500 (รองรับ 500 คน)
+    range: "Employees!A3:G500",  // ★ v1.25: เพิ่ม column E (ต่างจังหวัด), F (ค่าเดินทาง), G (ประกันสังคม)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
-    name:        (row[0] || "").trim(),
-    hourlyRate:  Number(row[1]) || 80,
-    holidayFlat: Number(row[2]) || 500,
-    userId:      (row[3] || "").trim(),
+    name:           (row[0] || "").trim(),
+    hourlyRate:     Number(row[1]) || 80,
+    holidayFlat:    Number(row[2]) || 500,
+    userId:         (row[3] || "").trim(),
+    outProvinceFlat: Number(row[4]) || 0,    // ★ v1.25
+    travelAllowance: Number(row[5]) || 0,    // ★ v1.25 (รายเดือน)
+    socialSecurity:  Number(row[6]) || 0,    // ★ v1.25 (รายเดือน หัก)
   })).filter(e => e.name);
 }
 

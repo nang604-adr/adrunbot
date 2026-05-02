@@ -316,6 +316,20 @@ textarea{resize:none;height:70px}
         <span id="holidayBannerText">วันหยุด — คิดแบบเหมาจ่าย</span>
       </div>
 
+      <!-- ★ v1.25: ทำงานต่างจังหวัด toggle -->
+      <div class="card" id="outProvinceCard">
+        <div class="card-body" style="padding:12px 14px">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;font-weight:600">
+            <input type="checkbox" id="outProvinceCheck" onchange="toggleOutProvince()" style="width:18px;height:18px;accent-color:var(--green);cursor:pointer">
+            <span>🚐 ทำงานต่างจังหวัด (ค้างคืน)</span>
+          </label>
+          <div id="outProvinceHint" style="display:none;margin-top:8px;padding:8px 10px;background:rgba(0,185,0,.1);border:1px solid rgba(0,185,0,.25);border-radius:8px;font-size:11px;color:#81c784;line-height:1.7">
+            ✅ เลือกแล้ว — ไม่ต้องลงเวลา (ระบบใช้เหมาจ่ายต่างจังหวัด)<br>
+            <span id="outProvinceFlatHint" style="font-size:10px;opacity:.85"></span>
+          </div>
+        </div>
+      </div>
+
       <!-- Time picker (weekday only) -->
       <div class="card" id="timePickerCard">
         <div class="card-header">⏰ ระบุเวลา OT <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 หมุนเลข 23→00 = ข้ามวัน</span></div>
@@ -733,7 +747,39 @@ function selectDate(dateStr, dow) {
     tp.style.display = "block";
     hb.style.display = "none";
   }
+  // ★ v1.25: refresh out-of-province hint with new date
+  refreshOutProvinceHint();
   renderCal();
+}
+
+// ★ v1.25: ทำงานต่างจังหวัด toggle
+function toggleOutProvince() {
+  const checked = document.getElementById("outProvinceCheck").checked;
+  const tp = document.getElementById("timePickerCard");
+  const hint = document.getElementById("outProvinceHint");
+  if (checked) {
+    tp.style.display = "none";   // ซ่อน time picker
+    hint.style.display = "block";
+  } else {
+    hint.style.display = "none";
+    // restore — เช็ควันหยุดอีกที
+    const isHolDate = STATE.holidays.some(h => h.date === STATE.selDate);
+    const isHol = STATE.selDow === 0 || isHolDate;
+    tp.style.display = isHol ? "none" : "block";
+  }
+  refreshOutProvinceHint();
+}
+
+function refreshOutProvinceHint() {
+  if (!STATE.empData) return;
+  const hint = document.getElementById("outProvinceFlatHint");
+  if (!hint) return;
+  const isHolDate = STATE.holidays.some(h => h.date === STATE.selDate);
+  const isHol = STATE.selDow === 0 || isHolDate;
+  const flatRate = isHol ? (STATE.empData.holidayFlat || 0) : (STATE.empData.outProvinceFlat || 0);
+  hint.textContent = isHol
+    ? `📌 วันนี้เป็นวันหยุด → ใช้เรท "วันหยุด" แทน`
+    : `เหมาจ่าย: ${flatRate.toLocaleString()} ฿`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -827,11 +873,13 @@ async function submitOT() {
   const dow       = STATE.selDow;
   const isHolDate = STATE.holidays.some(h => h.date === STATE.selDate);
   const isHol     = dow === 0 || isHolDate;
-  const startTime = isHol ? "-" : `${String(STATE.startH).padStart(2,"0")}:${String(STATE.startM).padStart(2,"0")}`;
-  const endTime   = isHol ? "-" : `${String(STATE.endH).padStart(2,"0")}:${String(STATE.endM).padStart(2,"0")}`;
+  // ★ v1.25: out-of-province
+  const isOutProvince = document.getElementById("outProvinceCheck")?.checked || false;
+  const startTime = (isHol || isOutProvince) ? "-" : `${String(STATE.startH).padStart(2,"0")}:${String(STATE.startM).padStart(2,"0")}`;
+  const endTime   = (isHol || isOutProvince) ? "-" : `${String(STATE.endH).padStart(2,"0")}:${String(STATE.endM).padStart(2,"0")}`;
 
-  // ★ v1.6: validate ทับเวลางานปกติก่อนส่ง (กัน round-trip server)
-  if (!isHol && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM)) {
+  // validate ทับเวลางานปกติ — เฉพาะกรณี OT ปกติ (ไม่ใช่หยุด/ตจว.)
+  if (!isHol && !isOutProvince && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM)) {
     return showErr(errBox, "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้");
   }
 
@@ -845,7 +893,7 @@ async function submitOT() {
       body: JSON.stringify({
         name: STATE.empData.name, date: STATE.selDate,
         startTime, endTime, task, location: loc,
-        otType: isHol ? "holiday" : "weekday",
+        otType: isOutProvince ? "outProvince" : (isHol ? "holiday" : "weekday"),
       }),
     });
     const data = await res.json();
@@ -859,6 +907,9 @@ async function submitOT() {
     toast(msg, "ok");
     document.getElementById("taskInput").value = "";
     document.getElementById("locInput").value  = "";
+    // ★ v1.25: reset out-of-province checkbox
+    const opc = document.getElementById("outProvinceCheck");
+    if (opc) { opc.checked = false; toggleOutProvince(); }
     setToday();
   } catch (e) {
     showErr(errBox, "เชื่อมต่อไม่ได้ กรุณาลองใหม่");
@@ -1778,17 +1829,28 @@ async function loadPayrollPreview() {
 
 function renderPayrollPreview(data) {
   const t = data.totals;
+  // ★ v1.25: แสดง breakdown — OT + travel - social = net
   const summaryHtml = data.summary.length === 0
     ? `<div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">ไม่มีรายการรอจ่ายในช่วงนี้</div>`
-    : data.summary.map(e => `
-        <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px">
-          <div style="flex:1;min-width:0">
-            <div style="font-weight:600">${e.name}</div>
-            <div style="font-size:10px;color:var(--sub)">${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays}</div>
+    : data.summary.map(e => {
+        const hasExtras = (e.travel || 0) > 0 || (e.social || 0) > 0;
+        const breakdown = hasExtras
+          ? `<div style="font-size:9px;color:var(--sub);margin-top:2px">OT ${e.pay.toLocaleString()}${e.travel?` +${e.travel.toLocaleString()}💵`:""}${e.social?` -${e.social.toLocaleString()}🏥`:""}</div>`
+          : "";
+        return `
+          <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600">${e.name}</div>
+              <div style="font-size:10px;color:var(--sub)">${e.days} วัน · ${e.hours} ชม. · วันหยุด/ตจว. ${e.holidays}</div>
+              ${breakdown}
+            </div>
+            <div style="text-align:right">
+              <div style="color:#81c784;font-weight:700">${(e.netPay ?? e.pay).toLocaleString()} ฿</div>
+              ${hasExtras?'<div style="font-size:9px;color:var(--sub)">สุทธิ</div>':""}
+            </div>
           </div>
-          <div style="color:#81c784;font-weight:700">${e.pay.toLocaleString()} ฿</div>
-        </div>
-      `).join("");
+        `;
+      }).join("");
 
   const carryHtml = data.carry.length === 0
     ? ""
@@ -1814,10 +1876,18 @@ function renderPayrollPreview(data) {
             <div style="font-size:9px;color:var(--sub)">พนักงาน</div>
           </div>
           <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
-            <div style="font-size:18px;font-weight:800;color:#ffd54f">${t.totalPay.toLocaleString()}</div>
-            <div style="font-size:9px;color:var(--sub)">บาท</div>
+            <div style="font-size:18px;font-weight:800;color:#ffd54f">${(t.totalNet ?? t.totalPay).toLocaleString()}</div>
+            <div style="font-size:9px;color:var(--sub)">${t.totalNet!==undefined && t.totalNet!==t.totalPay ? "สุทธิ" : "บาท"}</div>
           </div>
         </div>
+        ${(t.totalTravel || t.totalSocial) ? `
+          <div style="background:#141829;border-radius:10px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:var(--sub);text-align:center;line-height:1.7">
+            OT รวม <b style="color:#81c784">${t.totalPay.toLocaleString()}฿</b>
+            ${t.totalTravel ? ` <span style="color:#9fa8da">+ ค่าเดินทาง ${t.totalTravel.toLocaleString()}฿</span>` : ""}
+            ${t.totalSocial ? ` <span style="color:#ef9a9a">- ประกันสังคม ${t.totalSocial.toLocaleString()}฿</span>` : ""}
+            <br><b style="color:#ffd54f;font-size:13px">= สุทธิ ${(t.totalNet||0).toLocaleString()}฿</b>
+          </div>
+        ` : ""}
 
         <div class="card-header" style="border:0;padding:0 0 6px;font-size:11px">รายชื่อในรอบนี้:</div>
         <div style="background:#141829;border-radius:10px;max-height:200px;overflow-y:auto">${summaryHtml}</div>
@@ -2180,12 +2250,17 @@ function showSettingsSub(sub) {
 function renderSettingsEmps() {
   const rows = settingsEmps.map((e,i)=>{
     const bound = e.userId ? `<span class="bound-dot" title="ผูก LINE ID แล้ว"></span>` : "";
+    // ★ v1.25: แสดง bonus ต่างๆ
+    const extras = [];
+    if (e.outProvinceFlat) extras.push(`🚐${e.outProvinceFlat.toLocaleString()}`);
+    if (e.travelAllowance) extras.push(`💵+${e.travelAllowance.toLocaleString()}`);
+    if (e.socialSecurity)  extras.push(`🏥-${e.socialSecurity.toLocaleString()}`);
     return `
     <div class="emp-row">
       <div class="emp-avatar" style="background:${EMP_COLORS[e.name.charCodeAt(0)%EMP_COLORS.length]}">${e.name.charAt(0)}</div>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600">${bound}${e.name}</div>
-        <div style="font-size:10px;color:var(--sub)">${e.hourlyRate}฿/ชม. · หยุดเหมา${e.holidayFlat.toLocaleString()}฿</div>
+        <div style="font-size:10px;color:var(--sub)">${e.hourlyRate}฿/ชม. · หยุด${e.holidayFlat.toLocaleString()}${extras.length?' · '+extras.join(' '):''}</div>
       </div>
       <button class="btn btn-grey btn-sm" onclick="openEmpEdit(${i})">✏️</button>
       <button class="btn btn-red btn-sm" style="margin-left:4px" onclick="deleteEmp(${i})">🗑️</button>
@@ -2221,15 +2296,28 @@ function attachEmpPreview() {
   update();
 }
 
+// ★ v1.25: helper สร้างฟอร์มพนักงาน (รวม out-of-province, travel, social)
+function empFormFieldsHtml(e = {}) {
+  return `
+    <div><label>ชื่อ-นามสกุล${e.name?'':' (ตรงกับชื่อ LINE)'}</label><input id="eN" value="${e.name||''}" placeholder="เช่น สมชาย ใจดี"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+      <div><label>ค่าจ้าง/ชม. (฿)</label><input id="eH" type="number" value="${e.hourlyRate ?? 80}"></div>
+      <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="${e.holidayFlat ?? 500}"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+      <div><label>🚐 ค่าต่างจังหวัด/คืน (฿)</label><input id="eOP" type="number" value="${e.outProvinceFlat ?? 0}"></div>
+      <div><label>💵 ค่าเดินทาง/พิเศษ (฿/เดือน)</label><input id="eTA" type="number" value="${e.travelAllowance ?? 0}"></div>
+    </div>
+    <div style="margin-top:10px">
+      <label>🏥 ประกันสังคม (฿/เดือน — หัก)</label>
+      <input id="eSS" type="number" value="${e.socialSecurity ?? 0}">
+    </div>
+  `;
+}
+
 function openEmpAdd() {
   openModal("➕ เพิ่มพนักงาน", `
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <div><label>ชื่อ-นามสกุล (ตรงกับชื่อ LINE)</label><input id="eN" placeholder="เช่น สมชาย ใจดี"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <div><label>ค่าจ้าง/ชม. (฿)</label><input id="eH" type="number" value="80"></div>
-        <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="500"></div>
-      </div>
-    </div>
+    <div style="display:flex;flex-direction:column">${empFormFieldsHtml()}</div>
     ${empPreviewHtml()}
     <div style="height:12px"></div>
     <button class="btn btn-green" onclick="saveEmpAdd()">✅ เพิ่ม</button>
@@ -2240,11 +2328,9 @@ function openEmpAdd() {
 }
 
 async function saveEmpAdd() {
-  const n=document.getElementById("eN").value.trim();
-  const h=Number(document.getElementById("eH").value);
-  const f=Number(document.getElementById("eF").value);
-  if (!n) return toast("กรุณากรอกชื่อ","err");
-  await fetch("/api/employees",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f,userId:""})});
+  const body = empFormReadValues();
+  if (!body.name) return toast("กรุณากรอกชื่อ","err");
+  await fetch("/api/employees",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   closeModal(); toast("✅ เพิ่มพนักงานแล้ว","ok");
   await loadSettings();
 }
@@ -2256,13 +2342,7 @@ function openEmpEdit(i) {
     : `<div class="info-box" style="margin-bottom:10px;color:#ffb74d">⚠️ ยังไม่ได้ผูก LINE ID — จะผูกอัตโนมัติเมื่อพนักงานเข้า LIFF ครั้งแรก</div>`;
   openModal("✏️ แก้ไขพนักงาน", `
     ${boundInfo}
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <div><label>ชื่อ-นามสกุล</label><input id="eN" value="${e.name}"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <div><label>ค่าจ้าง/ชม. (฿)</label><input id="eH" type="number" value="${e.hourlyRate}"></div>
-        <div><label>เหมาจ่ายวันหยุด (฿)</label><input id="eF" type="number" value="${e.holidayFlat}"></div>
-      </div>
-    </div>
+    <div style="display:flex;flex-direction:column">${empFormFieldsHtml(e)}</div>
     ${empPreviewHtml()}
     <div style="height:12px"></div>
     <button class="btn btn-green" onclick="saveEmpEdit(${i})">✅ บันทึก</button>
@@ -2272,13 +2352,23 @@ function openEmpEdit(i) {
   attachEmpPreview();
 }
 
+function empFormReadValues() {
+  return {
+    name: (document.getElementById("eN")?.value || "").trim(),
+    hourlyRate: Number(document.getElementById("eH")?.value || 0),
+    holidayFlat: Number(document.getElementById("eF")?.value || 0),
+    outProvinceFlat: Number(document.getElementById("eOP")?.value || 0),
+    travelAllowance: Number(document.getElementById("eTA")?.value || 0),
+    socialSecurity: Number(document.getElementById("eSS")?.value || 0),
+    userId: "",
+  };
+}
+
 async function saveEmpEdit(i) {
-  const n=document.getElementById("eN").value.trim();
-  const h=Number(document.getElementById("eH").value);
-  const f=Number(document.getElementById("eF").value);
-  // ★ ส่ง userId เดิมไปด้วย ป้องกันถูกเขียนทับเป็นค่าว่าง
-  const uid = settingsEmps[i].userId || "";
-  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,hourlyRate:h,holidayFlat:f,userId:uid})});
+  const body = empFormReadValues();
+  // ★ ส่ง userId เดิมไปด้วย กันถูกเขียนทับเป็นค่าว่าง
+  body.userId = settingsEmps[i].userId || "";
+  await fetch(`/api/employees/${i}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   closeModal(); toast("✅ บันทึกแล้ว","ok"); await loadSettings();
 }
 
