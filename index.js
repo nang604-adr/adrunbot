@@ -1054,7 +1054,104 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
     ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
 
-    // Details
+    // ── ★ v1.26: Per-employee sheets (1 sheet per คน แบบตัวอย่าง) ──
+    const thaiDays = ["อา","จ","อ","พ","พฤ","ศ","ส"];
+    function thaiDayOfDate(thaiDateStr) {
+      // thaiDateStr = "dd/mm/yyyy" (พ.ศ.)
+      try {
+        const [d, m, y] = thaiDateStr.split("/").map(Number);
+        const dt = new Date(y - 543, m - 1, d);
+        return thaiDays[dt.getDay()] || "";
+      } catch { return ""; }
+    }
+    function safeSheetName(name) {
+      // Excel: ห้าม : \ / ? * [ ] และยาวไม่เกิน 31 ตัว
+      let s = name.replace(/[:\\/?*\[\]]/g, "_").trim();
+      if (s.length > 28) s = s.slice(0, 28);
+      return s || "พนักงาน";
+    }
+
+    // group recs by name
+    const recsByName = {};
+    recs.forEach(r => {
+      (recsByName[r.name] = recsByName[r.name] || []).push(r);
+    });
+
+    // sort employees ตามลำดับใน summary (สุทธิมาก→น้อย)
+    const usedSheetNames = new Set(["สรุป"]);
+    summary.forEach(emp => {
+      const list = (recsByName[emp.name] || [])
+        .slice()
+        .sort((a,b) => a.date.localeCompare(b.date));
+      const ed = empMapExp[emp.name] || {};
+      const hourlyRate = ed.hourlyRate || 80;
+
+      // นับคืน ตจว. (ค้างคืน) เพื่อใส่ "ตจว. คืนที่ X"
+      let opNight = 0;
+
+      const rows = [
+        [`ใบรายการ OT — ${emp.name}`],
+        [`รอบจ่าย: ${cutoff}    Payroll ID: ${payId}`],
+        [],
+        ["วันที่","วัน","รายละเอียดงาน","สถานที่","เริ่ม","สิ้นสุด","ชม.","ประเภท","ค่า (฿)"],
+      ];
+
+      list.forEach(r => {
+        const isOutProv = (r.otType || "").includes("ต่างจังหวัด");
+        let startCell = r.startTime;
+        let endCell = r.endTime;
+        if (isOutProv) {
+          opNight += 1;
+          startCell = `ตจว. คืนที่ ${opNight}`;
+          endCell = "";
+        }
+        rows.push([
+          r.date,
+          thaiDayOfDate(r.date),
+          r.task || "",
+          r.location || "",
+          startCell,
+          endCell,
+          r.hours || 0,
+          r.otType,
+          r.pay,
+        ]);
+      });
+
+      // total OT
+      const totalOT = list.reduce((s, r) => s + (r.pay || 0), 0);
+      const totalHours = list.reduce((s, r) => s + (r.hours || 0), 0);
+
+      rows.push([]);
+      rows.push(["", "", "", "", "", "รวม", +totalHours.toFixed(2), "", totalOT]);
+      rows.push([]);
+
+      // สรุปจ่าย
+      rows.push(["─── สรุปจ่าย ───"]);
+      rows.push(["+ ค่า OT", "", "", "", "", "", "", "", emp.pay]);
+      if (emp.travel) rows.push(["+ ค่าเดินทาง", "", "", "", "", "", "", "", emp.travel]);
+      if (emp.social) rows.push(["- ประกันสังคม", "", "", "", "", "", "", "", -emp.social]);
+      rows.push(["ทำจ่ายสุทธิ", "", "", "", "", "", "", "", emp.netPay]);
+      rows.push([]);
+      rows.push([`Rate: ${hourlyRate} บาท/ชม.    วันหยุด/ตจว.: ${ed.holidayFlat || 0} บาท    ตจว.: ${ed.outProvinceFlat || 0} บาท`]);
+
+      const wsEmp = XLSX.utils.aoa_to_sheet(rows);
+      wsEmp["!cols"] = [
+        {wch:12},{wch:5},{wch:28},{wch:14},{wch:14},{wch:10},{wch:8},{wch:18},{wch:12},
+      ];
+
+      // unique sheet name
+      let sname = safeSheetName(emp.name);
+      let n = 2;
+      while (usedSheetNames.has(sname)) {
+        sname = safeSheetName(emp.name) + "_" + n;
+        n += 1;
+      }
+      usedSheetNames.add(sname);
+      XLSX.utils.book_append_sheet(wb, wsEmp, sname);
+    });
+
+    // ── Details (ทั้งหมดรวมกัน — เก็บไว้สำหรับอ้างอิง) ──
     const detailRows = [
       ["ชื่อ","วันที่","เริ่ม","สิ้นสุด","ชม.","งาน","สถานที่","ประเภท","ค่า (฿)","Payroll ID"],
     ];
@@ -1066,7 +1163,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
     });
     const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
     ws2["!cols"] = [{wch:18},{wch:13},{wch:8},{wch:8},{wch:8},{wch:25},{wch:14},{wch:16},{wch:12},{wch:20}];
-    XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+    XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียดทั้งหมด");
 
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
     const fname = `Payroll_${payId}.xlsx`;
@@ -1078,7 +1175,7 @@ app.get("/api/export/payroll/:payId", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.16)"));
+app.get("/", (_, res) => res.send("🟢 OT Adrun Bot + LIFF running (v1.26)"));
 
 // ── /liff redirect — ถ้ามีคน bookmark URL เก่าไว้ ────────────
 app.get("/liff", (_, res) => {
