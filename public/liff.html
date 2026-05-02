@@ -442,6 +442,7 @@ let STATE = {
   payCalYear: 0, payCalMonth: 0,
   payShowAll: false,
   payYearFilter: "all",
+  reqShowAll: false,
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -1519,11 +1520,39 @@ function renderChartCompare() {
     </div>`;
 }
 
+// ★ v1.24: ซ่อนคำขอที่ดำเนินการแล้ว + toggle ดูทั้งหมด
+function setReqShowAll(val) { STATE.reqShowAll = val; renderAdminRequests(); }
+
 function renderAdminRequests() {
-  const html = adminRequests.length ? adminRequests.slice().reverse().map((r,i)=>{
-    const sc = r.status==="รอดำเนินการ"?"badge-pend":r.status==="อนุมัติแล้ว"?"badge-ok":"badge-rej";
+  const showAll = STATE.reqShowAll || false;
+
+  const pending = adminRequests.filter(r => r.status === "รอดำเนินการ");
+  const completed = adminRequests.filter(r => r.status !== "รอดำเนินการ");
+  const list = showAll ? adminRequests : pending;
+
+  // Toggle bar
+  const toggleBar = `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--card);border-radius:10px;margin-bottom:10px;font-size:11px;color:var(--sub);border:1px solid var(--border)">
+      <span>${list.length} รายการ${showAll?"":` รอดำเนินการ`}</span>
+      <button onclick="setReqShowAll(${!showAll})" style="background:transparent;border:1px solid var(--border);color:var(--sub);font-size:10px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:'Noto Sans Thai',sans-serif">
+        ${showAll ? '👁️‍🗨️ ซ่อนที่ดำเนินการแล้ว' : `🔍 ดูทั้งหมด${completed.length?` (+${completed.length})`:""}`}
+      </button>
+    </div>
+  `;
+
+  if (!list.length) {
+    const empty = pending.length === 0 && completed.length > 0 && !showAll
+      ? `<div style="text-align:center;color:var(--sub);font-size:13px;padding:30px">ไม่มีคำขอที่รอดำเนินการ<br><span style="font-size:11px;opacity:.7">${completed.length} รายการที่ดำเนินการแล้ว — กด "ดูทั้งหมด"</span></div>`
+      : `<div style="text-align:center;color:var(--sub);font-size:13px;padding:30px">ไม่มีคำขอแก้ไข</div>`;
+    document.getElementById("admin-requests").innerHTML = toggleBar + empty;
+    return;
+  }
+
+  const html = list.slice().reverse().map(r => {
+    const isCompleted = r.status !== "รอดำเนินการ";
+    const sc = r.status==="รอดำเนินการ"?"badge-pend":r.status.includes("อนุมัติ")?"badge-ok":"badge-rej";
     return `
-    <div class="card" style="margin-bottom:10px">
+    <div class="card" style="margin-bottom:10px;${isCompleted?'opacity:.55':''}">
       <div style="padding:12px 14px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div style="font-size:13px;font-weight:700">${r.name} · ${r.date}</div>
@@ -1538,8 +1567,8 @@ function renderAdminRequests() {
         </div>`:""}
       </div>
     </div>`;
-  }).join("") : `<div style="text-align:center;color:var(--sub);font-size:13px;padding:30px">ไม่มีคำขอแก้ไข</div>`;
-  document.getElementById("admin-requests").innerHTML = html;
+  }).join("");
+  document.getElementById("admin-requests").innerHTML = toggleBar + html;
 }
 
 // ★ v1.23: อนุมัติ = ลบ record อย่างเดียว — พนักงานลงใหม่เอง
