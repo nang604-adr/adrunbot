@@ -238,6 +238,28 @@ async function verifyLineIdToken(idToken) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// ★ v1.30 BUG-04: in-memory mutex per (name|date)
+//   กัน race ตอน 2 client ยิง POST /api/ot พร้อมกัน
+//   (Railway มักรัน 1 instance — ถ้า scale-out ต้องเปลี่ยนเป็น distributed lock)
+// ══════════════════════════════════════════════════════════════
+const __otMutexes = new Map();
+function withOTMutex(key, fn) {
+  const prev = __otMutexes.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise(r => { release = r; });
+  __otMutexes.set(key, prev.then(() => next).catch(() => next));
+  return prev
+    .catch(() => {})
+    .then(async () => {
+      try { return await fn(); }
+      finally {
+        release();
+        if (__otMutexes.get(key) === next) __otMutexes.delete(key);
+      }
+    });
+}
+
 // ── OT Rules ─────────────────────────────────────────────────
 const MAX_OT_PER_DAY     = 5;
 const WEEKDAY_MULTIPLIER = 1.5;
@@ -505,9 +527,12 @@ app.delete("/api/holidays/:idx", requireAdmin, async (req, res) => {
 });
 
 // ── POST /api/ot — บันทึก OT ────────────────────────────────
+// ★ v1.30 BUG-04: wrap ด้วย mutex ต่อ (name|date) กัน race
 app.post("/api/ot", async (req, res) => {
   const { name, date, startTime, endTime, task, location, otType } = req.body;
+  if (!name || !date) return res.status(400).json({ error: "ต้องระบุชื่อและวันที่" });
   try {
+    return await withOTMutex(`${name}|${date}`, async () => {
     const sheets    = await getSheetsClient();
     const employees = await getEmployees(sheets);
     const emp       = employees.find(e => e.name === name);
@@ -570,6 +595,7 @@ app.post("/api/ot", async (req, res) => {
 
     await saveRecord(sheets, { name, date, startTime, endTime, hours, task, location, otType: "วันธรรมดา", pay });
     return res.json({ ok: true, hours, payableHours, pay, otType: "วันธรรมดา", capped: payableHours < hours });
+    });  // end withOTMutex
 
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -653,6 +679,37 @@ app.post("/api/edit-request", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // ── Helper: เปรียบเทียบวันที่ Thai dd/mm/yyyy ที่ <= cutoff ───
+// ★ v1.30 BUG-05: หา set ของพนักงานที่ "รับ travel + SSO ไปแล้ว" ในเดือนของ cutoff
+//   - ใช้กับ preview + commit เพื่อกัน duplicate (รายเดือน — จ่ายซ้ำหลายรอบในเดือนเดียวไม่ได้)
+async function getEmployeesAlreadyPaidExtrasThisMonth(sheets, allRecords, cutoff) {
+  const parts = String(cutoff || "").split("/");
+  if (parts.length !== 3) return new Set();
+  const monthKey = `/${parts[1]}/${parts[2]}`;
+  // อ่าน Payroll_Log
+  let logRows = [];
+  try {
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: "Payroll_Log!A3:J5000",
+    });
+    logRows = r.data.values || [];
+  } catch (_) { /* tab อาจยังไม่มี */ }
+  const activePayIds = new Set();
+  logRows.forEach(row => {
+    const payId    = (row[0] || "").trim();
+    const cutoffStr= (row[1] || "").trim();
+    const status   = (row[7] || "active").trim();
+    if (payId && status === "active" && cutoffStr.endsWith(monthKey)) {
+      activePayIds.add(payId);
+    }
+  });
+  const empsAlreadyPaid = new Set();
+  allRecords.forEach(r => {
+    if (r.paidAt && activePayIds.has(r.paidAt)) empsAlreadyPaid.add(r.name);
+  });
+  return empsAlreadyPaid;
+}
+
 function isOnOrBeforeCutoff(recordDate, cutoffDate) {
   const [d1,m1,y1] = recordDate.split("/").map(Number);
   const [d2,m2,y2] = cutoffDate.split("/").map(Number);
@@ -689,15 +746,19 @@ app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
       else                          byEmp[r.name].holidays += 1;
     });
     // ★ v1.25: เพิ่ม travelAllowance + หัก socialSecurity (รายเดือน — รวมในรอบจ่าย)
+    // ★ v1.30 BUG-05: ถ้าจ่ายไปแล้วในเดือนเดียวกัน → travel=0, social=0
+    const empsAlreadyPaid = await getEmployeesAlreadyPaidExtrasThisMonth(sheets, all, cutoff);
     const summary = Object.values(byEmp).map(e => {
       const empData = empMap[e.name] || {};
-      const travel = empData.travelAllowance || 0;
-      const social = empData.socialSecurity || 0;
+      const skipExtras = empsAlreadyPaid.has(e.name);
+      const travel = skipExtras ? 0 : (empData.travelAllowance || 0);
+      const social = skipExtras ? 0 : (empData.socialSecurity || 0);
       const netPay = e.pay + travel - social;
       return {
         name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
         holidays: e.holidays, pay: e.pay, count: e.count,
         travel, social, netPay,
+        extrasSkipped: skipExtras,  // ★ ให้ client โชว์ note ได้
       };
     }).sort((a,b) => b.netPay - a.netPay);
 
@@ -764,13 +825,20 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
     const grossOT  = pending.reduce((s,r) => s+r.pay, 0);
     // ดึงพนักงานเพื่อคำนวณ travel + social
     const empList = await getEmployees(sheets);
+    // ★ v1.30 BUG-05: skip travel/social ถ้ารับไปแล้วในเดือนเดียวกัน
+    const empsAlreadyPaid = await getEmployeesAlreadyPaidExtrasThisMonth(sheets, all, cutoff);
     let totalTravel = 0, totalSocial = 0;
+    let extrasSkippedCount = 0;
     for (const name of employeeNames) {
+      if (empsAlreadyPaid.has(name)) { extrasSkippedCount++; continue; }
       const e = empList.find(x => x.name === name);
       if (e) {
         totalTravel += e.travelAllowance || 0;
         totalSocial += e.socialSecurity || 0;
       }
+    }
+    if (extrasSkippedCount > 0) {
+      console.log(`💡 Skip travel/social สำหรับ ${extrasSkippedCount} คน (จ่ายไปแล้วในเดือนนี้)`);
     }
     const totalPay = grossOT + totalTravel - totalSocial;  // net
 
@@ -1261,13 +1329,40 @@ app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
       else                          byEmp[r.name].holidays += 1;
     });
     // ★ v1.25: เพิ่ม travelAllowance + หัก socialSecurity ใน summary
+    // ★ v1.30 BUG-05: dedup — ถ้ารับ extras ไปแล้วใน "รอบอื่น" ของเดือนเดียวกัน → travel=0, social=0
+    //   (รอบนี้ = payId ปัจจุบัน ต้องนับเสมอ ถึงจะ match กับยอดที่ commit ไป)
     const empListExp = await getEmployees(sheets);
     const empMapExp = {};
     empListExp.forEach(e => empMapExp[e.name] = e);
+    const empsPaidExtrasOtherRound = new Set();
+    if (cutoff !== "-") {
+      try {
+        const pl = await sheets.spreadsheets.values.get({
+          spreadsheetId: SHEET_ID, range: "Payroll_Log!A3:J5000",
+        });
+        const cParts = cutoff.split("/");
+        const monthKey = `/${cParts[1]}/${cParts[2]}`;
+        const otherActivePayIds = new Set();
+        (pl.data.values || []).forEach(row => {
+          const pid = (row[0]||"").trim();
+          const cs  = (row[1]||"").trim();
+          const st  = (row[7]||"active").trim();
+          if (pid && pid !== payId && st === "active" && cs.endsWith(monthKey)) {
+            otherActivePayIds.add(pid);
+          }
+        });
+        all.forEach(r => {
+          if (r.paidAt && otherActivePayIds.has(r.paidAt)) {
+            empsPaidExtrasOtherRound.add(r.name);
+          }
+        });
+      } catch (_) { /* ignore — fallback คือไม่ skip */ }
+    }
     const summary = Object.values(byEmp).map(e => {
       const ed = empMapExp[e.name] || {};
-      const travel = ed.travelAllowance || 0;
-      const social = ed.socialSecurity || 0;
+      const skipExtras = empsPaidExtrasOtherRound.has(e.name);
+      const travel = skipExtras ? 0 : (ed.travelAllowance || 0);
+      const social = skipExtras ? 0 : (ed.socialSecurity || 0);
       const netPay = e.pay + travel - social;
       return { name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
                holidays: e.holidays, pay: e.pay, travel, social, netPay };
@@ -1610,17 +1705,8 @@ function workWindowLabel(workEndMin) {
   return `08:30–${String(eh).padStart(2,"0")}:${String(em).padStart(2,"0")}`;
 }
 
-// ★ v1.5: เช็คว่า OT อยู่ในช่วง OT day (06:00 ถึง 06:00 ถัดไป) หรือเปล่า
-function validateOTWindow(startTime, endTime) {
-  const [sh, sm] = startTime.split(":").map(Number);
-  const [eh, em] = endTime.split(":").map(Number);
-  let s = sh * 60 + sm;
-  let e = eh * 60 + em;
-  if (e < s) e += 24 * 60; // ข้ามวัน
-  if (s < OT_DAY_START_MIN) return "เวลาเริ่ม OT ต้องไม่ก่อน 06:00";
-  if (e > OT_DAY_END_MIN)   return "OT ต้องสิ้นสุดไม่เกิน 06:00 ของวันถัดไป";
-  return null;
-}
+// ★ v1.30: ลบ validateOTWindow (dead code — ไม่เคยถูกเรียก)
+//   overlapsWorkHours คุมขอบเขตอยู่แล้ว ถ้าจะคืน rule 06:00-06:00 ค่อย wire กลับ
 
 function getTodayThai() {
   const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
@@ -1703,7 +1789,10 @@ async function handleBotEvent(event) {
       const parts    = text.replace(/#OT/i,"").replace(/วันหยุด|หยุด/g,"").trim();
       const [task="", location=""] = parts.includes("|") ? parts.split("|").map(s=>s.trim()) : [parts, ""];
       const typeLabel = todayDow===0 ? "วันอาทิตย์" : isHolDate ? "วันหยุดนักขัตฤกษ์" : "วันหยุด";
-      await saveRecord(sheets, { name:empData.name, date:todayDate, startTime:"-", endTime:"-", hours:0, task:task||"-", location, otType:typeLabel, pay:empData.holidayFlat });
+      // ★ v1.30 BUG-04: wrap save ด้วย mutex
+      await withOTMutex(`${empData.name}|${todayDate}`, () =>
+        saveRecord(sheets, { name:empData.name, date:todayDate, startTime:"-", endTime:"-", hours:0, task:task||"-", location, otType:typeLabel, pay:empData.holidayFlat })
+      );
       return client.replyMessage(event.replyToken, { type:"text", text:`✅ บันทึก OT ${typeLabel}\n👤 ${empData.name}\n📝 ${task||"-"}\n📅 ${todayDate}` });
     }
 
@@ -1712,7 +1801,6 @@ async function handleBotEvent(event) {
 
     const [startTime, endTime] = [times[0][0], times[1][0]];
     const hours    = calcHours(startTime, endTime);
-    const already  = await getDayHours(sheets, empData.name, todayDate);
     if (hours <= 0) return client.replyMessage(event.replyToken, { type:"text", text:"⚠️ เวลาไม่ถูกต้อง" });
 
     // ★ v1.6: ลงเวลาได้ทุกช่วง ห้ามแค่ทับเวลางาน
@@ -1722,24 +1810,28 @@ async function handleBotEvent(event) {
       return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ช่วง ${workWindowLabel(botWorkEnd)} เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้` });
     }
 
-    // ★ v1.21: ห้ามทับกับ record ในวันเดียวกัน
-    const overlap = await findOverlappingRecord(sheets, empData.name, todayDate, startTime, endTime);
-    if (overlap) {
-      return client.replyMessage(event.replyToken, { type:"text", text:`⚠️ ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime} (${overlap.hours} ชม.) ในวันเดียวกัน` });
+    // ★ v1.30 BUG-04: ทุก check + save ทำใน mutex (atomic ต่อ name|date)
+    const result = await withOTMutex(`${empData.name}|${todayDate}`, async () => {
+      // ★ v1.21: ห้ามทับกับ record ในวันเดียวกัน
+      const overlap = await findOverlappingRecord(sheets, empData.name, todayDate, startTime, endTime);
+      if (overlap) return { ok: false, reason: `⚠️ ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime} (${overlap.hours} ชม.) ในวันเดียวกัน` };
+      // ★ v1.2: ลงเวลาตามจริง คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
+      const already = await getDayHours(sheets, empData.name, todayDate);
+      const remainingPayable = Math.max(0, MAX_OT_PER_DAY - already);
+      const payableHours     = Math.min(hours, remainingPayable);
+      const after = text.replace(/#OT/i,"").replace(startTime,"").replace(endTime,"").trim();
+      const [task="", location=""] = after.includes("|") ? after.split("|").map(s=>s.trim()) : [after, ""];
+      const pay   = Math.round(payableHours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
+      await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
+      return { ok: true, payableHours, task };
+    });
+
+    if (!result.ok) {
+      return client.replyMessage(event.replyToken, { type:"text", text: result.reason });
     }
-
-    // ★ v1.2: ลงเวลาตามจริง คำนวณค่า OT สูงสุด MAX_OT_PER_DAY ชม./วัน
-    const remainingPayable = Math.max(0, MAX_OT_PER_DAY - already);
-    const payableHours     = Math.min(hours, remainingPayable);
-
-    const after = text.replace(/#OT/i,"").replace(startTime,"").replace(endTime,"").trim();
-    const [task="", location=""] = after.includes("|") ? after.split("|").map(s=>s.trim()) : [after, ""];
-    const pay   = Math.round(payableHours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
-    await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
-
-    const replyText = payableHours < hours
-      ? `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime}\n📊 ทำจริง ${hours}ชม. · คิด ${payableHours}ชม.\n📝 ${task||"-"}\n📅 ${todayDate}`
-      : `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${task||"-"}\n📅 ${todayDate}`;
+    const replyText = result.payableHours < hours
+      ? `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime}\n📊 ทำจริง ${hours}ชม. · คิด ${result.payableHours}ชม.\n📝 ${result.task||"-"}\n📅 ${todayDate}`
+      : `✅ บันทึก OT\n👤 ${empData.name}\n⏰ ${startTime}–${endTime} (${hours}ชม.)\n📝 ${result.task||"-"}\n📅 ${todayDate}`;
     return client.replyMessage(event.replyToken, { type:"text", text: replyText });
 
   } catch (err) {
