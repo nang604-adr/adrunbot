@@ -636,7 +636,12 @@ async function showSelfClaim() {
 }
 
 async function claimEmployee(name) {
-  if (!confirm(`คุณคือ "${name}" ใช่ไหม?\n\nหลังยืนยัน LINE ID ของคุณจะถูกผูกกับชื่อนี้ — เปลี่ยนได้เฉพาะ Admin เท่านั้น`)) return;
+  const ok = await confirmModal({
+    title: "ยืนยันตัวตน",
+    message: `คุณคือ "${name}" ใช่ไหม?\n\nหลังยืนยัน LINE ID ของคุณจะถูกผูกกับชื่อนี้ — เปลี่ยนได้เฉพาะ Admin เท่านั้น`,
+    okText: "✅ ใช่ ยืนยัน",
+  });
+  if (!ok) return;
 
   try {
     // ★ v1.30 SEC-03: server reads userId from verified ID token
@@ -1678,20 +1683,24 @@ async function openEditApproval(reqIdx) {
 }
 
 async function applyEditApproval(reqIdx) {
-  try {
-    const res = await apiFetch(`/api/edit-requests/${reqIdx}/apply`, {
-      method: "POST",
-      body: JSON.stringify({ action: "delete" }),
-    });
-    const data = await res.json();
-    if (!res.ok) return toast(data.error || "ไม่สำเร็จ", "err");
+  // ★ v1.31 UX-02: loading state (กัน double-click)
+  const btn = document.querySelector("#modalBody .btn-green");
+  await withBtnLoading(btn, { text: "⏳ กำลังอนุมัติ..." }, async () => {
+    try {
+      const res = await apiFetch(`/api/edit-requests/${reqIdx}/apply`, {
+        method: "POST",
+        body: JSON.stringify({ action: "delete" }),
+      });
+      const data = await res.json();
+      if (!res.ok) return toast(data.error || "ไม่สำเร็จ", "err");
 
-    closeModal();
-    toast("✅ อนุมัติ + ลบรายการแล้ว — แจ้งพนักงานลงใหม่", "ok");
-    await loadAdmin();
-  } catch (e) {
-    toast("เชื่อมต่อไม่ได้", "err");
-  }
+      closeModal();
+      toast("✅ อนุมัติ + ลบรายการแล้ว — แจ้งพนักงานลงใหม่", "ok");
+      await loadAdmin();
+    } catch (e) {
+      toast("เชื่อมต่อไม่ได้", "err");
+    }
+  });
 }
 
 async function handleRequest(idx, status) {
@@ -1932,18 +1941,32 @@ function renderPayrollPreview(data) {
 
 async function commitPayroll() {
   if (!payrollPreview || payrollPreview.summary.length === 0) return;
-  if (!confirm(`ยืนยันทำจ่าย ${payrollPreview.totals.records} รายการ รวม ${payrollPreview.totals.totalPay.toLocaleString()} ฿?\n\nหลังจากนี้รายการเหล่านี้จะถูก lock — แก้ไขไม่ได้\n(แต่ admin undo ได้)`)) return;
+  const ok = await confirmModal({
+    title: "ยืนยันทำจ่าย",
+    message: `จะบันทึก ${payrollPreview.totals.records} รายการ รวม ${payrollPreview.totals.totalPay.toLocaleString()} ฿\n\nหลังบันทึก records ทั้งหมดจะถูก lock — แก้ไขไม่ได้ (แต่ admin undo ได้ภายหลัง)`,
+    okText: "💾 ยืนยันบันทึก",
+  });
+  if (!ok) return;
 
   const cutoff = STATE.payrollCutoff;
   const adminName = STATE.empData?.name || STATE.displayName || "Admin";
 
+  // ★ v1.31 UX-02: ล็อกปุ่มกัน double-click (commit ใช้เวลา 5+ วินาที)
+  const commitBtn = document.querySelector("#payPreviewArea .btn-green");
+  if (commitBtn) {
+    commitBtn.disabled = true;
+    commitBtn.innerHTML = "⏳ กำลังบันทึก... อย่าปิดหน้านี้";
+  }
   try {
     const res = await apiFetch("/api/payroll/commit", {
       method: "POST",
       body: JSON.stringify({ cutoff, createdBy: adminName }),
     });
     const data = await res.json();
-    if (!res.ok) return toast(data.error || "บันทึกไม่สำเร็จ", "err");
+    if (!res.ok) {
+      if (commitBtn) { commitBtn.disabled = false; commitBtn.innerHTML = "💾 บันทึกการจ่าย + Download Excel"; }
+      return toast(data.error || "บันทึกไม่สำเร็จ", "err");
+    }
 
     // ★ v1.17.1 simplified
     toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
@@ -2044,7 +2067,13 @@ function renderPayrollHistory() {
 }
 
 async function undoPayroll(payId) {
-  if (!confirm(`ยกเลิกรอบจ่าย ${payId}?\n\nrecord ทั้งหมดในรอบนี้จะกลับเป็น "ยังไม่จ่าย" และต้องทำใหม่`)) return;
+  const ok = await confirmModal({
+    title: "ยกเลิกรอบจ่าย?",
+    message: `รอบ ${payId}\n\nrecords ทั้งหมดจะกลับเป็น "ยังไม่จ่าย" — ต้องทำใหม่`,
+    okText: "↺ ยืนยันยกเลิก",
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const adminName = STATE.empData?.name || STATE.displayName || "Admin";
     const res = await apiFetch("/api/payroll/undo", {
@@ -2411,7 +2440,13 @@ async function saveEmpEdit(i) {
 }
 
 async function deleteEmp(i) {
-  if (!confirm(`ลบ "${settingsEmps[i].name}" ออกใช่ไหม?\n(ประวัติ OT เดิมจะยังคงอยู่)`)) return;
+  const ok = await confirmModal({
+    title: "ลบพนักงาน?",
+    message: `ลบ "${settingsEmps[i].name}" ออกจากระบบ?\n\n(ประวัติ OT เดิมจะยังคงอยู่ในประวัติ)`,
+    okText: "🗑️ ลบ",
+    danger: true,
+  });
+  if (!ok) return;
   // ★ ใช้ DELETE endpoint จริง (backend v1.1)
   const res = await apiFetch(`/api/employees/${i}`,{method:"DELETE"});
   if (!res.ok) { const d = await res.json().catch(()=>({})); toast(d.error||"ลบไม่สำเร็จ","err"); return; }
@@ -2523,6 +2558,16 @@ function validateHolForm() {
   const n = document.getElementById("hN").value.trim();
   if (!d || !n) { toast("กรุณากรอกข้อมูลให้ครบ","err"); return null; }
   if (!/^\d{2}\/\d{2}\/\d{4}$/.test(d)) { toast("รูปแบบวันที่ผิด ใช้ dd/mm/yyyy","err"); return null; }
+  // ★ v1.31 UX-04: validate ปี พ.ศ. + เดือน + วัน-ในเดือนจริง
+  const [dd, mm, yy] = d.split("/").map(Number);
+  if (yy < 2500 || yy > 2700) { toast(`ปี พ.ศ. ${yy} ดูไม่น่าเชื่อ — ใช้ 25xx`,"err"); return null; }
+  if (mm < 1 || mm > 12)      { toast("เดือนต้องอยู่ 01–12","err"); return null; }
+  if (dd < 1 || dd > 31)      { toast("วันที่ต้องอยู่ 01–31","err"); return null; }
+  // เช็คว่าวันที่นั้นมีจริง (เช่น 31/02 → ไม่มี)
+  const dt = new Date(yy - 543, mm - 1, dd);
+  if (dt.getDate() !== dd || dt.getMonth() !== mm - 1) {
+    toast(`ไม่มีวันที่ ${dd}/${mm}/${yy} จริง`,"err"); return null;
+  }
   return { date: d, name: n };
 }
 
@@ -2570,7 +2615,13 @@ async function saveHolEdit(i) {
 // ★ NEW: deleteHol
 async function deleteHol(i) {
   const h = settingsHols[i];
-  if (!confirm(`ลบวันหยุด "${h.name}" (${h.date}) ใช่ไหม?`)) return;
+  const ok = await confirmModal({
+    title: "ลบวันหยุด?",
+    message: `ลบ "${h.name}" (${h.date})?`,
+    okText: "🗑️ ลบ",
+    danger: true,
+  });
+  if (!ok) return;
   const res = await apiFetch(`/api/holidays/${i}`,{method:"DELETE"});
   if (!res.ok) { const d = await res.json().catch(()=>({})); toast(d.error||"ลบไม่สำเร็จ","err"); return; }
   toast("🗑️ ลบแล้ว","ok"); await loadSettings();
@@ -2588,6 +2639,42 @@ function openModal(title, bodyHtml) {
 function closeModal(e) {
   if (e && e.target !== document.getElementById("modalOverlay")) return;
   document.getElementById("modalOverlay").classList.remove("show");
+}
+
+// ★ v1.31 UX-01: in-app confirm modal (แทน native confirm() ที่ตกบรรยากาศ LIFF)
+//   ใช้: const ok = await confirmModal({ title, message, okText, danger });
+function confirmModal(opts = {}) {
+  return new Promise(resolve => {
+    const title    = opts.title    || "ยืนยัน?";
+    const message  = opts.message  || "";
+    const okText   = opts.okText   || "ตกลง";
+    const okStyle  = opts.danger ? "btn-red" : "btn-green";
+    const okEsc    = esc(okText);
+    const msgHtml  = esc(message).replace(/\n/g, "<br>");
+    openModal(title, `
+      <div style="font-size:13px;color:var(--sub);line-height:1.7;margin-bottom:14px">${msgHtml}</div>
+      <button class="btn ${okStyle}" id="cmOk">${okEsc}</button>
+      <div style="height:8px"></div>
+      <button class="btn btn-grey" id="cmCancel">ยกเลิก</button>
+    `);
+    document.getElementById("cmOk").onclick     = () => { closeModal(); resolve(true); };
+    document.getElementById("cmCancel").onclick = () => { closeModal(); resolve(false); };
+  });
+}
+
+// ★ v1.31 UX-02: wrap action ด้วย button-loading (กัน double-click + visual feedback)
+async function withBtnLoading(btn, opts, fn) {
+  if (typeof opts === "function") { fn = opts; opts = {}; }
+  if (!btn) return await fn();
+  const original = btn.innerHTML;
+  const wasDisabled = btn.disabled;
+  btn.disabled = true;
+  btn.innerHTML = (opts && opts.text) || "⏳ กำลังประมวลผล...";
+  try { return await fn(); }
+  finally {
+    btn.disabled = wasDisabled;
+    btn.innerHTML = original;
+  }
 }
 
 let _toastTimer;
