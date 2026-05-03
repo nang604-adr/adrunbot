@@ -1251,29 +1251,43 @@ function renderAdminOverview() {
     `;
   } else {
     // ทั้งหมด → existing employee bars
-    const totalPay = adminRecords.reduce((s,r)=>s+r.pay,0);
+    // ★ v1.32 B: supervisor ไม่เห็นยอดเงิน — ใช้ชั่วโมงแทน
+    const showMoney = STATE.role === "admin";
+    const totalPay   = adminRecords.reduce((s,r)=>s+r.pay,0);
+    const totalHours = adminRecords.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
     const byEmp = adminEmployees.map(e => {
       const r2  = adminRecords.filter(r=>r.name===e.name);
       const h   = r2.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0);
+      const hol = r2.filter(r=>r.otType!=="วันธรรมดา").length;
       const pay = r2.reduce((s,r)=>s+r.pay,0);
-      return { ...e, h, pay, count: r2.length };
+      return { ...e, h, hol, pay, count: r2.length };
     }).filter(e => e.count > 0);
 
     bodyHtml = `
       <div class="card">
         <div class="card-header">📊 OT แยกตามพนักงาน <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 กดชื่อด้านบน เพื่อดูรายคน</span></div>
-        ${byEmp.length ? byEmp.map(e => `
+        ${byEmp.length ? byEmp.map(e => {
+          const rightLabel = showMoney
+            ? `${e.pay.toLocaleString()} ฿`
+            : `${+e.h.toFixed(1)} ชม.`;
+          const barPct = showMoney
+            ? (totalPay>0?Math.min((e.pay/totalPay)*100,100):0)
+            : (totalHours>0?Math.min((e.h/totalHours)*100,100):0);
+          const subLabel = showMoney
+            ? `${+e.h.toFixed(1)} ชม. · ${e.count} รายการ →`
+            : `${e.count} รายการ · วันหยุด/ตจว. ${e.hol} →`;
+          return `
           <div style="padding:10px 14px;border-bottom:1px solid var(--border);cursor:pointer" onclick="selectAdminEmp('${e.name.replace(/'/g,"\\'")}')">
             <div style="display:flex;justify-content:space-between;margin-bottom:5px">
               <span style="font-size:13px">${esc(e.name)}</span>
-              <span style="font-size:12px;color:#81c784;font-weight:700">${e.pay.toLocaleString()} ฿</span>
+              <span style="font-size:12px;color:#81c784;font-weight:700">${rightLabel}</span>
             </div>
             <div style="height:5px;background:rgba(255,255,255,.05);border-radius:3px">
-              <div style="height:100%;width:${totalPay>0?Math.min((e.pay/totalPay)*100,100):0}%;background:linear-gradient(90deg,var(--green),var(--green2));border-radius:3px"></div>
+              <div style="height:100%;width:${barPct}%;background:linear-gradient(90deg,var(--green),var(--green2));border-radius:3px"></div>
             </div>
-            <div style="font-size:10px;color:var(--sub);margin-top:3px">${+e.h.toFixed(1)} ชม. · ${e.count} รายการ →</div>
+            <div style="font-size:10px;color:var(--sub);margin-top:3px">${subLabel}</div>
           </div>
-        `).join("") : `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีข้อมูล OT เดือนนี้</div>`}
+        `;}).join("") : `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีข้อมูล OT เดือนนี้</div>`}
       </div>
     `;
   }
