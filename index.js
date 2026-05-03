@@ -239,6 +239,37 @@ async function verifyLineIdToken(idToken) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// ★ v1.31 D3: simple in-memory rate limiter (per userId / fallback IP)
+//   - 30 requests / 60 sec → 429 Too Many Requests
+//   - cleanup ทุก 5 นาที กัน Map โต
+// ══════════════════════════════════════════════════════════════
+const __rl = new Map();           // key → array of timestamps (ms)
+const RL_WINDOW_MS = 60_000;
+const RL_MAX = 30;
+function rateLimitByUser(req, res, next) {
+  const key = (
+    req.headers["x-line-user-id"] ||
+    req.query._uid ||
+    req.ip ||
+    "anon"
+  ).toString();
+  const now = Date.now();
+  const arr = (__rl.get(key) || []).filter(t => now - t < RL_WINDOW_MS);
+  if (arr.length >= RL_MAX) {
+    return res.status(429).json({ error: "ส่งคำขอเร็วเกินไป รอสักครู่แล้วลองใหม่" });
+  }
+  arr.push(now);
+  __rl.set(key, arr);
+  next();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, arr] of __rl) {
+    if (arr.every(t => now - t > RL_WINDOW_MS * 5)) __rl.delete(k);
+  }
+}, 5 * 60_000).unref();
+
+// ══════════════════════════════════════════════════════════════
 // ★ v1.30 BUG-04: in-memory mutex per (name|date)
 //   กัน race ตอน 2 client ยิง POST /api/ot พร้อมกัน
 //   (Railway มักรัน 1 instance — ถ้า scale-out ต้องเปลี่ยนเป็น distributed lock)
@@ -528,7 +559,8 @@ app.delete("/api/holidays/:idx", requireAdmin, async (req, res) => {
 
 // ── POST /api/ot — บันทึก OT ────────────────────────────────
 // ★ v1.30 BUG-04: wrap ด้วย mutex ต่อ (name|date) กัน race
-app.post("/api/ot", async (req, res) => {
+// ★ v1.31 D3: rate limit
+app.post("/api/ot", rateLimitByUser, async (req, res) => {
   const { name, date, startTime, endTime, task, location, otType } = req.body;
   if (!name || !date) return res.status(400).json({ error: "ต้องระบุชื่อและวันที่" });
   try {
@@ -604,7 +636,7 @@ app.post("/api/ot", async (req, res) => {
 
 // ── POST /api/bind-employee — Self-claim ผูกบัญชี LINE ★ v1.13
 // ★ v1.30 SEC-03b: บังคับ ID token (กันคนปลอมตัว claim ชื่อคนอื่น)
-app.post("/api/bind-employee", async (req, res) => {
+app.post("/api/bind-employee", rateLimitByUser, async (req, res) => {
   const { employeeName } = req.body;
   const auth = req.headers.authorization || "";
   const idToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
@@ -649,7 +681,8 @@ app.post("/api/bind-employee", async (req, res) => {
 });
 
 // ── POST /api/edit-request — ขอแก้ไข OT ────────────────────
-app.post("/api/edit-request", async (req, res) => {
+// ★ v1.31 D3: rate limit
+app.post("/api/edit-request", rateLimitByUser, async (req, res) => {
   const { name, date, recordDesc, note } = req.body;
   try {
     const sheets = await getSheetsClient();
