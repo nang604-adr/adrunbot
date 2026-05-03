@@ -131,23 +131,40 @@ const client = new line.Client(lineConfig);
 const app    = express();
 
 // ── Webhook ต้องมาก่อน express.json() เสมอ ──────────────────
+// ★ v1.30 SEC-01: verify HMAC signature ก่อนตอบ 200 — กันคนยิงปลอม
 app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
-  console.log("📨 Webhook received! sig=", req.headers["x-line-signature"]?.slice(0, 20));
-  res.json({ status: "ok" });
-  const body = req.body;
   const sig  = req.headers["x-line-signature"];
-  const hash = crypto.createHmac("SHA256", process.env.LINE_SECRET)
-                     .update(body).digest("base64");
+  const body = req.body;
+  if (!sig || !body) return res.status(400).end();
+
+  let hash;
+  try {
+    hash = crypto.createHmac("SHA256", process.env.LINE_SECRET)
+                 .update(body).digest("base64");
+  } catch (e) {
+    console.error("HMAC compute failed:", e.message);
+    return res.status(500).end();
+  }
+
   if (sig !== hash) {
-    console.error("❌ Signature mismatch! LINE_SECRET ผิด หรือไม่ตรงกับ Messaging API channel");
-    console.error("   expected:", hash.slice(0, 20));
-    console.error("   received:", sig?.slice(0, 20));
+    console.error("❌ Webhook signature mismatch — drop");
+    return res.status(401).end();
+  }
+
+  // ✅ verified — respond OK then process events async (LINE retries ถ้า > 1 sec)
+  res.status(200).end();
+
+  let events = [];
+  try {
+    events = JSON.parse(body.toString()).events || [];
+  } catch (e) {
+    console.error("Webhook JSON parse failed:", e.message);
     return;
   }
-  console.log("✅ Signature OK");
-  const events = JSON.parse(body.toString()).events || [];
   console.log(`📋 Events: ${events.length}`, events.map(e => `${e.type}:${e.message?.text || ""}`));
-  await Promise.all(events.map(handleBotEvent));
+  await Promise.all(
+    events.map(e => handleBotEvent(e).catch(err => console.error("handleBotEvent:", err.message)))
+  );
 });
 
 // ── Middleware ───────────────────────────────────────────────
@@ -163,6 +180,62 @@ async function getSheetsClient() {
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   return google.sheets({ version: "v4", auth });
+}
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.30 SEC-02: AUTH HELPERS
+//   - getAdminIds()         : list ของ admin LINE IDs
+//   - requireAdmin          : middleware เช็ค header x-line-user-id
+//   - verifyLineIdToken     : verify ID token กับ LINE oauth2 endpoint
+// ══════════════════════════════════════════════════════════════
+function getAdminIds() {
+  return (process.env.ADMIN_LINE_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
+}
+
+function requireAdmin(req, res, next) {
+  // ★ ฝั่ง client ส่ง header `x-line-user-id` (จาก liff.getProfile().userId)
+  // — สำหรับ GET endpoint ที่ใช้ <a href> (download Excel) จะ fallback อ่านจาก ?_uid=
+  //   transitional measure — รอบถัดไปจะเปลี่ยนเป็น signed token / fetch+blob
+  // — สำหรับการป้องกันแบบเข้มขึ้น ใส่ verify ID token ใน Authorization header เพิ่ม
+  const uid = (
+    req.headers["x-line-user-id"] ||
+    req.query._uid ||
+    ""
+  ).toString().trim();
+  const admins = getAdminIds();
+  if (!uid || !admins.includes(uid)) {
+    return res.status(403).json({ error: "Forbidden — admin only" });
+  }
+  next();
+}
+
+// verify LIFF ID token กับ LINE oauth2 endpoint
+// (ใช้ env LIFF_CHANNEL_ID — เลขช่อง LINE Login channel ที่ผูกกับ LIFF)
+async function verifyLineIdToken(idToken) {
+  if (!idToken) return null;
+  const channelId = process.env.LIFF_CHANNEL_ID;
+  if (!channelId) {
+    console.warn("⚠️ LIFF_CHANNEL_ID ยังไม่ได้ตั้ง → ข้าม verify (ไม่ปลอดภัย)");
+    return null;
+  }
+  try {
+    const params = new URLSearchParams({ id_token: idToken, client_id: channelId });
+    const r = await fetch("https://api.line.me/oauth2/v2.1/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      console.warn("verifyLineIdToken failed:", r.status, t.slice(0, 200));
+      return null;
+    }
+    const data = await r.json();
+    return { sub: data.sub, name: data.name, email: data.email || "" };
+  } catch (e) {
+    console.error("verifyLineIdToken error:", e.message);
+    return null;
+  }
 }
 
 // ── OT Rules ─────────────────────────────────────────────────
@@ -194,27 +267,48 @@ app.get("/api/config", (_, res) => {
   res.json({ liffId: process.env.LIFF_ID });
 });
 
-// ── GET /api/me?userId=Uxxxx&displayName=xxx ────────────────
-// ★ B+ patch: match by userId first → fall back displayName + auto-bind
+// ── GET /api/me — ★ v1.30 SEC-03: ใช้ Authorization Bearer <idToken>
+// ฝั่ง client ส่ง: Authorization: Bearer <liff.getIDToken()>
+// ถ้า verify ผ่าน → ใช้ userId+displayName จาก token (ปลอม-ไม่-ได้)
+// ถ้าไม่ส่ง token → fallback ไปอ่าน query string (legacy, log warning)
 app.get("/api/me", async (req, res) => {
-  const { userId, displayName } = req.query;
+  let userId, displayName;
+  let verified = false;
+
+  const auth = req.headers.authorization || "";
+  const idToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (idToken) {
+    const claims = await verifyLineIdToken(idToken);
+    if (claims) {
+      userId = claims.sub;
+      displayName = claims.name || "";
+      verified = true;
+    } else {
+      return res.status(401).json({ error: "Invalid LIFF ID token" });
+    }
+  } else {
+    // legacy fallback — log warning to monitor migration
+    console.warn("⚠️ /api/me called without ID token — legacy mode");
+    userId = req.query.userId;
+    displayName = req.query.displayName;
+  }
+
   try {
     const sheets    = await getSheetsClient();
     const employees = await getEmployees(sheets);
-    const admins    = (process.env.ADMIN_LINE_IDS || "")
-                        .split(",").map(s => s.trim()).filter(Boolean);
+    const admins    = getAdminIds();
 
     // 1) จับคู่ด้วย userId ก่อน (น่าเชื่อถือสุด)
     let emp = employees.find(e => e.userId && e.userId === userId);
     let matchedBy = emp ? "userId" : null;
 
     // 2) ถ้าไม่เจอ → fallback หาด้วย displayName
+    //    ★ SEC: auto-bind จะทำเฉพาะกรณี verified=true (ID token) เพื่อกันปลอมตัว
     if (!emp && displayName) {
       emp = employees.find(e => e.name === displayName);
       if (emp) {
         matchedBy = "displayName";
-        // 3) auto-bind: เจอด้วยชื่อ + ยังไม่มี userId → เขียนกลับ
-        if (!emp.userId && userId) {
+        if (!emp.userId && userId && verified) {
           const row = idxToRow(emp.idx);
           try {
             await sheets.spreadsheets.values.update({
@@ -228,6 +322,9 @@ app.get("/api/me", async (req, res) => {
           } catch (err) {
             console.error("auto-bind failed:", err.message);
           }
+        } else if (!emp.userId && userId && !verified) {
+          // legacy mode — DO NOT auto-bind (ป้องกัน impersonation)
+          matchedBy = "displayName(unverified)";
         }
       }
     }
@@ -242,6 +339,7 @@ app.get("/api/me", async (req, res) => {
       hourlyRate:  emp?.hourlyRate  || 0,
       holidayFlat: emp?.holidayFlat || 0,
       matchedBy,
+      verified,  // ★ ให้ client เช็คได้ว่า ID token verify ผ่านไหม
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -275,10 +373,16 @@ app.get("/api/employees", async (req, res) => {
 });
 
 // ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
-app.post("/api/employees", async (req, res) => {
+app.post("/api/employees", requireAdmin, async (req, res) => {
   const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: "กรุณากรอกชื่อพนักงาน" });
   try {
     const sheets = await getSheetsClient();
+    // ★ v1.30: ป้องกันชื่อซ้ำ
+    const existing = await getEmployees(sheets);
+    if (existing.some(e => e.name === String(name).trim())) {
+      return res.status(400).json({ error: `มีพนักงานชื่อ "${name}" อยู่แล้วในระบบ` });
+    }
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: "Employees!A:H",  // ★ v1.27
@@ -298,7 +402,7 @@ app.post("/api/employees", async (req, res) => {
 });
 
 // ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
-app.put("/api/employees/:idx", async (req, res) => {
+app.put("/api/employees/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
   const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
   try {
@@ -322,7 +426,7 @@ app.put("/api/employees/:idx", async (req, res) => {
 });
 
 // ── DELETE /api/employees/:idx — ลบพนักงาน (Admin) ★ NEW ────
-app.delete("/api/employees/:idx", async (req, res) => {
+app.delete("/api/employees/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
   try {
     const sheets = await getSheetsClient();
@@ -344,10 +448,18 @@ app.get("/api/holidays", async (req, res) => {
 });
 
 // ── POST /api/holidays — เพิ่มวันหยุด (Admin) ───────────────
-app.post("/api/holidays", async (req, res) => {
+app.post("/api/holidays", requireAdmin, async (req, res) => {
   const { date, name: hName } = req.body;
+  if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) {
+    return res.status(400).json({ error: "รูปแบบวันที่ผิด ต้องเป็น dd/mm/yyyy (พ.ศ.)" });
+  }
   try {
     const sheets = await getSheetsClient();
+    // ★ v1.30: ป้องกันวันหยุดซ้ำ
+    const existing = await getHolidayList(sheets);
+    if (existing.some(h => h.date === date)) {
+      return res.status(400).json({ error: `วันที่ ${date} มีในรายการวันหยุดแล้ว` });
+    }
     const dow    = getDowFullThai(date);
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
@@ -362,7 +474,7 @@ app.post("/api/holidays", async (req, res) => {
 });
 
 // ── PUT /api/holidays/:idx — แก้ไขวันหยุด (Admin) ★ NEW ─────
-app.put("/api/holidays/:idx", async (req, res) => {
+app.put("/api/holidays/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
   const { date, name: hName } = req.body;
   try {
@@ -381,7 +493,7 @@ app.put("/api/holidays/:idx", async (req, res) => {
 });
 
 // ── DELETE /api/holidays/:idx — ลบวันหยุด (Admin) ★ NEW ─────
-app.delete("/api/holidays/:idx", async (req, res) => {
+app.delete("/api/holidays/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
   try {
     const sheets = await getSheetsClient();
@@ -465,8 +577,15 @@ app.post("/api/ot", async (req, res) => {
 });
 
 // ── POST /api/bind-employee — Self-claim ผูกบัญชี LINE ★ v1.13
+// ★ v1.30 SEC-03b: บังคับ ID token (กันคนปลอมตัว claim ชื่อคนอื่น)
 app.post("/api/bind-employee", async (req, res) => {
-  const { userId, employeeName } = req.body;
+  const { employeeName } = req.body;
+  const auth = req.headers.authorization || "";
+  const idToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const claims = await verifyLineIdToken(idToken);
+  if (!claims) return res.status(401).json({ error: "ต้อง login LIFF ก่อน (ID token invalid)" });
+  const userId = claims.sub;
+
   if (!userId || !employeeName) return res.status(400).json({ error: "ข้อมูลไม่ครบ" });
   try {
     const sheets    = await getSheetsClient();
@@ -544,7 +663,7 @@ function isOnOrBeforeCutoff(recordDate, cutoffDate) {
 
 // ── GET /api/payroll/preview?cutoff=DD/MM/YYYY ────────────
 // ดูตัวอย่างก่อนจ่าย — รวม pending records ทั้งหมด ที่ date ≤ cutoff
-app.get("/api/payroll/preview", async (req, res) => {
+app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
   const { cutoff } = req.query;
   if (!cutoff || !/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
     return res.status(400).json({ error: "cutoff ต้องอยู่ในรูป DD/MM/YYYY (พ.ศ.)" });
@@ -604,7 +723,7 @@ app.get("/api/payroll/preview", async (req, res) => {
 });
 
 // ── POST /api/payroll/commit — Confirm จ่าย → mark column K ─
-app.post("/api/payroll/commit", async (req, res) => {
+app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
   const { cutoff, createdBy } = req.body;
   if (!cutoff || !/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
     return res.status(400).json({ error: "cutoff ต้องอยู่ในรูป DD/MM/YYYY" });
@@ -690,7 +809,7 @@ app.post("/api/payroll/commit", async (req, res) => {
 
 // ── POST /api/payroll/undo — ปลด record ในรอบนั้นกลับเป็น pending ──
 // ★ v1.17.4: soft cleanup — ถ้าไม่เจอ record ก็ mark log เป็น undone (orphan cleanup)
-app.post("/api/payroll/undo", async (req, res) => {
+app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
   const { payId, undoneBy } = req.body;
   if (!payId) return res.status(400).json({ error: "ระบุ payId" });
   try {
@@ -758,7 +877,7 @@ app.post("/api/payroll/undo", async (req, res) => {
 });
 
 // ── GET /api/payroll/history — ดูประวัติการจ่ายเงิน ──────────
-app.get("/api/payroll/history", async (req, res) => {
+app.get("/api/payroll/history", requireAdmin, async (req, res) => {
   try {
     const sheets = await getSheetsClient();
     const r = await sheets.spreadsheets.values.get({
@@ -786,7 +905,7 @@ app.get("/api/payroll/history", async (req, res) => {
 });
 
 // ── GET /api/admin/records — ทุก record สำหรับ Admin ─────────
-app.get("/api/admin/records", async (req, res) => {
+app.get("/api/admin/records", requireAdmin, async (req, res) => {
   const { month, year } = req.query;
   try {
     const sheets = await getSheetsClient();
@@ -801,7 +920,7 @@ app.get("/api/admin/records", async (req, res) => {
 });
 
 // ── GET /api/edit-requests — คำขอแก้ไข (Admin) ──────────────
-app.get("/api/edit-requests", async (req, res) => {
+app.get("/api/edit-requests", requireAdmin, async (req, res) => {
   try {
     const sheets = await getSheetsClient();
     const r      = await sheets.spreadsheets.values.get({
@@ -819,7 +938,7 @@ app.get("/api/edit-requests", async (req, res) => {
 });
 
 // ── PUT /api/edit-requests/:idx — อนุมัติ/ปฏิเสธ (Admin) ─────
-app.put("/api/edit-requests/:idx", async (req, res) => {
+app.put("/api/edit-requests/:idx", requireAdmin, async (req, res) => {
   const row    = idxToRow(Number(req.params.idx));
   const { status } = req.body;
   try {
@@ -838,7 +957,7 @@ app.put("/api/edit-requests/:idx", async (req, res) => {
 
 // ★ v1.22: POST /api/edit-requests/:idx/apply — อนุมัติ + แก้ record จริง
 // ★ v1.22.1: รองรับทั้ง weekday + holiday + delete record
-app.post("/api/edit-requests/:idx/apply", async (req, res) => {
+app.post("/api/edit-requests/:idx/apply", requireAdmin, async (req, res) => {
   const reqIdx = Number(req.params.idx);
   const { action, newStartTime, newEndTime, newTask, newLocation, newDate } = req.body;
   // action: "edit" (default) | "delete"
@@ -1000,7 +1119,7 @@ app.post("/api/edit-requests/:idx/apply", async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // ── GET /api/export/monthly?employee=&month=&year= ──────────
-app.get("/api/export/monthly", async (req, res) => {
+app.get("/api/export/monthly", requireAdmin, async (req, res) => {
   let { employee = "", month, year } = req.query;
   try {
     const sheets = await getSheetsClient();
@@ -1102,7 +1221,7 @@ app.get("/api/export/monthly", async (req, res) => {
 });
 
 // ── GET /api/export/payroll/:payId ─────────────────────────
-app.get("/api/export/payroll/:payId", async (req, res) => {
+app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
   const { payId } = req.params;
   try {
     const sheets = await getSheetsClient();
