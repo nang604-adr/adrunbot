@@ -571,22 +571,18 @@ async function init() {
       document.getElementById("adminBadge").style.display = "inline";
       document.getElementById("tab-admin").style.display  = "block";
       document.getElementById("tab-settings").style.display = "block";
-      // admin = supervisor power → เห็น tab approve ด้วย
-      document.getElementById("tab-supervisor").style.display = "block";
+      // ★ v1.32: admin ไม่เห็น tab "อนุมัติ" — เป็นหน้าที่ supervisor เท่านั้น
     } else if (STATE.role === "supervisor") {
-      // badge ส้มแทน admin
+      // badge สีน้ำเงินแทน admin
       const badge = document.getElementById("adminBadge");
       badge.textContent = "หัวหน้างาน";
       badge.style.display = "inline";
       badge.style.background = "rgba(92,107,192,.2)";
       badge.style.color = "#9fa8da";
-      document.getElementById("tab-admin").style.display     = "block";
+      document.getElementById("tab-admin").style.display      = "block";
       document.getElementById("tab-supervisor").style.display = "block";
       // ตั้งค่า ไม่เห็น
-    }
-    // โหลด pending count สำหรับ supervisor/admin
-    if (STATE.role === "admin" || STATE.role === "supervisor") {
-      refreshSupervisorBadge().catch(() => {});
+      refreshSupervisorBadge().catch(() => {});  // โหลด badge ตัวเลข
     }
 
     // ★ v1.13: ถ้าไม่ found และไม่ใช่ admin → แสดงหน้า self-claim
@@ -2080,11 +2076,12 @@ function renderPayrollHistory() {
   const years = [...new Set(payrollHistory.map(p => (p.cutoff||"").split("/")[2] || ""))].filter(Boolean).sort().reverse();
 
   // Filter logic
+  // ★ v1.32: ซ่อน undone + rejected ใน default view (กด "ดูทั้งหมด" เพื่อตรวจประวัติ)
   let filtered = payrollHistory;
-  if (!showAll) filtered = filtered.filter(p => p.status !== "undone");
+  if (!showAll) filtered = filtered.filter(p => p.status !== "undone" && p.status !== "rejected");
   if (yearFilter !== "all") filtered = filtered.filter(p => (p.cutoff||"").endsWith("/" + yearFilter));
 
-  const undoneCount = payrollHistory.filter(p => p.status === "undone").length;
+  const hiddenCount = payrollHistory.filter(p => p.status === "undone" || p.status === "rejected").length;
 
   // Year chips (ถ้ามีหลายปี)
   const yearChips = years.length > 1 ? `
@@ -2099,7 +2096,7 @@ function renderPayrollHistory() {
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border);font-size:10px;color:var(--sub)">
       <span>${filtered.length} รายการ${yearFilter!=='all'?` (พ.ศ. ${yearFilter})`:""}</span>
       <button onclick="setPayShowAll(${!showAll})" style="background:transparent;border:1px solid var(--border);color:var(--sub);font-size:10px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:'Noto Sans Thai',sans-serif">
-        ${showAll ? '👁️‍🗨️ ซ่อน undone' : `🔍 ดูทั้งหมด${undoneCount?` (+${undoneCount})`:""}`}
+        ${showAll ? '👁️‍🗨️ ซ่อนยกเลิก/ไม่อนุมัติ' : `🔍 ดูทั้งหมด${hiddenCount?` (+${hiddenCount})`:""}`}
       </button>
     </div>
   `;
