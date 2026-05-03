@@ -277,6 +277,8 @@ textarea{resize:none;height:70px}
     <button class="tab" onclick="showTab('myot')" id="tab-myot">📊 OT ของฉัน</button>
     <button class="tab" onclick="showTab('admin')" id="tab-admin" style="display:none">🔐 Admin</button>
     <button class="tab" onclick="showTab('settings')" id="tab-settings" style="display:none">⚙️ ตั้งค่า</button>
+    <!-- ★ v1.32: tab สำหรับ supervisor (ป้ายตัวเลขจำนวนรอบที่รออนุมัติ) -->
+    <button class="tab" onclick="showTab('supervisor')" id="tab-supervisor" style="display:none">📥 อนุมัติ <span id="supBadge" style="background:#ef6c00;color:#fff;font-size:9px;padding:1px 5px;border-radius:8px;margin-left:2px;display:none">0</span></button>
   </div>
 
   <div id="content">
@@ -400,6 +402,7 @@ textarea{resize:none;height:70px}
       <div class="sub-tabs">
         <button class="sub-tab active" onclick="showAdminSub('overview')" id="stab-overview">📊 ภาพรวม</button>
         <button class="sub-tab" onclick="showAdminSub('chart')" id="stab-chart">📈 กราฟ</button>
+        <!-- ★ v1.32: ซ่อนสำหรับ supervisor -->
         <button class="sub-tab" onclick="showAdminSub('requests')" id="stab-requests">🔧 แก้ไข</button>
         <button class="sub-tab" onclick="showAdminSub('payroll')" id="stab-payroll">💰 จ่ายเงิน</button>
       </div>
@@ -417,6 +420,13 @@ textarea{resize:none;height:70px}
       </div>
       <div id="settings-employees"></div>
       <div id="settings-holidays" style="display:none"></div>
+    </div>
+
+    <!-- ★ v1.32: ══════════════════ SUPERVISOR TAB ══════════════════ -->
+    <div class="section" id="sec-supervisor">
+      <div id="supervisor-content">
+        <div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div>
+      </div>
     </div>
 
   </div>
@@ -466,7 +476,7 @@ function withUidQS(url) {
 }
 
 let STATE = {
-  liffId: "", userId: "", displayName: "", idToken: "", isAdmin: false,
+  liffId: "", userId: "", displayName: "", idToken: "", isAdmin: false, role: "employee",
   empData: null, holidays: [],
   selDate: "", selDow: 0,
   startH: 18, startM: 0, endH: 20, endM: 0,
@@ -543,6 +553,7 @@ async function init() {
     const hol = await holRes.json();
 
     STATE.isAdmin  = me.isAdmin;
+    STATE.role     = me.role || (me.isAdmin ? "admin" : "employee");  // ★ v1.32
     STATE.empData  = me.found ? me : null;
     STATE.holidays = hol.holidays || [];
 
@@ -552,10 +563,30 @@ async function init() {
     av.textContent  = profile.displayName.charAt(0);
     av.style.background = EMP_COLORS[profile.displayName.charCodeAt(0) % EMP_COLORS.length];
     nm.textContent  = profile.displayName;
-    if (STATE.isAdmin) {
+    // ★ v1.32: tab visibility ตาม role
+    //   admin       → admin (ทุก sub) + settings
+    //   supervisor  → admin (เฉพาะ overview, chart) + supervisor (อนุมัติ)
+    //   employee    → ไม่มี
+    if (STATE.role === "admin") {
       document.getElementById("adminBadge").style.display = "inline";
       document.getElementById("tab-admin").style.display  = "block";
       document.getElementById("tab-settings").style.display = "block";
+      // admin = supervisor power → เห็น tab approve ด้วย
+      document.getElementById("tab-supervisor").style.display = "block";
+    } else if (STATE.role === "supervisor") {
+      // badge ส้มแทน admin
+      const badge = document.getElementById("adminBadge");
+      badge.textContent = "หัวหน้างาน";
+      badge.style.display = "inline";
+      badge.style.background = "rgba(92,107,192,.2)";
+      badge.style.color = "#9fa8da";
+      document.getElementById("tab-admin").style.display     = "block";
+      document.getElementById("tab-supervisor").style.display = "block";
+      // ตั้งค่า ไม่เห็น
+    }
+    // โหลด pending count สำหรับ supervisor/admin
+    if (STATE.role === "admin" || STATE.role === "supervisor") {
+      refreshSupervisorBadge().catch(() => {});
     }
 
     // ★ v1.13: ถ้าไม่ found และไม่ใช่ admin → แสดงหน้า self-claim
@@ -678,13 +709,15 @@ function showMyLineId() {
 // TABS
 // ══════════════════════════════════════════════════════════════
 function showTab(name) {
-  ["record","myot","admin","settings"].forEach(t => {
-    document.getElementById(`sec-${t}`).classList.toggle("show", t === name);
+  ["record","myot","admin","settings","supervisor"].forEach(t => {
+    const sec = document.getElementById(`sec-${t}`);
+    if (sec) sec.classList.toggle("show", t === name);
     document.getElementById(`tab-${t}`)?.classList.toggle("active", t === name);
   });
-  if (name === "myot")     loadMyOT();
-  if (name === "admin")    loadAdmin();
-  if (name === "settings") loadSettings();
+  if (name === "myot")       loadMyOT();
+  if (name === "admin")      loadAdmin();
+  if (name === "settings")   loadSettings();
+  if (name === "supervisor") loadSupervisor();
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1140,14 +1173,26 @@ async function loadAdmin() {
   const mm = String(d.getMonth()+1).padStart(2,"0");
   const yy = String(d.getFullYear()+543);
 
-  const [recRes, empRes, reqRes] = await Promise.all([
+  // ★ v1.32: supervisor (ไม่ใช่ admin) — ไม่เรียก /api/edit-requests (admin-only) + ซ่อน sub-tabs
+  const isAdminUser = STATE.role === "admin";
+  if (!isAdminUser) {
+    document.getElementById("stab-requests").style.display = "none";
+    document.getElementById("stab-payroll").style.display  = "none";
+    if (STATE.adminSub === "requests" || STATE.adminSub === "payroll") {
+      STATE.adminSub = "overview";
+    }
+  }
+
+  const fetches = [
     apiFetch(`/api/admin/records?month=${mm}&year=${yy}`),
     apiFetch("/api/employees"),
-    apiFetch("/api/edit-requests"),
-  ]);
-  const recData = await recRes.json();
-  const empData = await empRes.json();
-  const reqData = await reqRes.json();
+  ];
+  if (isAdminUser) fetches.push(apiFetch("/api/edit-requests"));
+
+  const results = await Promise.all(fetches);
+  const recData = await results[0].json();
+  const empData = await results[1].json();
+  const reqData = isAdminUser ? await results[2].json() : { requests: [] };
 
   adminRecords   = recData.records || [];
   adminEmployees = empData.employees || [];
@@ -1931,7 +1976,8 @@ function renderPayrollPreview(data) {
 
         ${data.summary.length > 0 ? `
           <div style="height:12px"></div>
-          <button class="btn btn-green" onclick="commitPayroll()">💾 บันทึกการจ่าย + Download Excel</button>
+          <button class="btn btn-green" onclick="commitPayroll()">📤 ขออนุมัติจากหัวหน้างาน</button>
+          <div style="font-size:10px;color:var(--sub);text-align:center;margin-top:6px">หลังขออนุมัติ records จะถูก lock — รอหัวหน้างานอนุมัติก่อนถึงจะ download Excel ได้</div>
         ` : ""}
       </div>
     </div>
@@ -1939,23 +1985,23 @@ function renderPayrollPreview(data) {
   `;
 }
 
+// ★ v1.32: เปลี่ยน flow — กด "ขออนุมัติ" → submit pending → รอ supervisor → admin มา finalize ทีหลัง
 async function commitPayroll() {
   if (!payrollPreview || payrollPreview.summary.length === 0) return;
   const ok = await confirmModal({
-    title: "ยืนยันทำจ่าย",
-    message: `จะบันทึก ${payrollPreview.totals.records} รายการ รวม ${payrollPreview.totals.totalPay.toLocaleString()} ฿\n\nหลังบันทึก records ทั้งหมดจะถูก lock — แก้ไขไม่ได้ (แต่ admin undo ได้ภายหลัง)`,
-    okText: "💾 ยืนยันบันทึก",
+    title: "ขออนุมัติจากหัวหน้างาน",
+    message: `รอบนี้: ${payrollPreview.totals.records} รายการ รวม ${payrollPreview.totals.totalPay.toLocaleString()} ฿\n\nrecords จะถูก lock + รอหัวหน้างานอนุมัติ\nหลังอนุมัติ พี่ค่อยมากด "บันทึก + Download" ทีหลัง`,
+    okText: "📤 ส่งขออนุมัติ",
   });
   if (!ok) return;
 
   const cutoff = STATE.payrollCutoff;
   const adminName = STATE.empData?.name || STATE.displayName || "Admin";
 
-  // ★ v1.31 UX-02: ล็อกปุ่มกัน double-click (commit ใช้เวลา 5+ วินาที)
   const commitBtn = document.querySelector("#payPreviewArea .btn-green");
   if (commitBtn) {
     commitBtn.disabled = true;
-    commitBtn.innerHTML = "⏳ กำลังบันทึก... อย่าปิดหน้านี้";
+    commitBtn.innerHTML = "⏳ กำลังส่ง... อย่าปิดหน้านี้";
   }
   try {
     const res = await apiFetch("/api/payroll/commit", {
@@ -1964,23 +2010,45 @@ async function commitPayroll() {
     });
     const data = await res.json();
     if (!res.ok) {
-      if (commitBtn) { commitBtn.disabled = false; commitBtn.innerHTML = "💾 บันทึกการจ่าย + Download Excel"; }
-      return toast(data.error || "บันทึกไม่สำเร็จ", "err");
+      if (commitBtn) { commitBtn.disabled = false; commitBtn.innerHTML = "📤 ขออนุมัติจากหัวหน้างาน"; }
+      return toast(data.error || "ส่งไม่สำเร็จ", "err");
     }
 
-    // ★ v1.17.1 simplified
-    toast(`✅ บันทึก ${data.records} รายการ — ${data.totalPay.toLocaleString()}฿`, "ok");
-    const url = withUidQS(`${location.origin}/api/export/payroll/${encodeURIComponent(data.payId)}`);
-    if (isLiffMobile()) {
-      openExternalOrShowLink(url, `📥 ดาวน์โหลด Payroll ${data.payId}`);
-    } else {
-      // Open in new tab (avoids navigating away)
-      window.open(url, "_blank");
-    }
+    toast(`📤 ส่งขออนุมัติ ${data.records} รายการแล้ว — รอหัวหน้างาน`, "ok");
     payrollPreview = null;
     document.getElementById("payPreviewArea").innerHTML = "";
     await loadPayrollHistory();
-    await loadAdmin();  // refresh admin records to show paid status
+    await loadAdmin();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+// ★ v1.32: Admin click "บันทึก + Download Excel" หลังหัวหน้างาน approve แล้ว
+async function finalizePayroll(payId) {
+  const ok = await confirmModal({
+    title: "บันทึกการจ่าย + ดาวน์โหลด",
+    message: `รอบ ${payId} ได้รับอนุมัติแล้ว\n\nบันทึกรายการเป็น "จ่ายเรียบร้อย" + ดาวน์โหลด Excel`,
+    okText: "💾 ยืนยัน + Download",
+  });
+  if (!ok) return;
+  const adminName = STATE.empData?.name || STATE.displayName || "Admin";
+  try {
+    const res = await apiFetch(`/api/payroll/finalize/${encodeURIComponent(payId)}`, {
+      method: "POST",
+      body: JSON.stringify({ finalizedBy: adminName }),
+    });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "ไม่สำเร็จ", "err");
+
+    toast(`✅ บันทึก ${payId} เรียบร้อย`, "ok");
+    const url = withUidQS(`${location.origin}/api/export/payroll/${encodeURIComponent(payId)}`);
+    if (isLiffMobile()) {
+      openExternalOrShowLink(url, `📥 ดาวน์โหลด Payroll ${payId}`);
+    } else {
+      window.open(url, "_blank");
+    }
+    await loadPayrollHistory();
   } catch (e) {
     toast("เชื่อมต่อไม่ได้", "err");
   }
@@ -2039,26 +2107,43 @@ function renderPayrollHistory() {
     return;
   }
 
+  // ★ v1.32: render ตาม status ใหม่
+  const STATUS_META = {
+    pending_approval: { icon: "⏳", label: "รอหัวหน้างาน", color: "#ffb74d" },
+    approved:         { icon: "🎯", label: "อนุมัติแล้ว — รอ admin บันทึก", color: "#81c784" },
+    active:           { icon: "✅", label: "จ่ายเรียบร้อย", color: "#81c784" },
+    rejected:         { icon: "❌", label: "ไม่อนุมัติ", color: "#ef9a9a" },
+    undone:           { icon: "🔄", label: "ยกเลิก", color: "#9fa8da" },
+  };
   const html = filtered.slice().reverse().map(p => {
-    const isUndone = p.status === "undone";
-    const ico = isUndone ? "🔄" : "✅";
+    const meta = STATUS_META[p.status] || { icon: "•", label: p.status, color: "#9fa8da" };
+    const dim = (p.status === "undone" || p.status === "rejected") ? 'opacity:.6' : '';
+
+    // ★ ปุ่มตาม status:
+    //   pending_approval → ไม่มีปุ่ม (รอ supervisor)
+    //   approved         → ปุ่ม "บันทึก+Download" (สีเขียว) + ↺ ยกเลิก
+    //   active           → ปุ่ม download + ↺ ยกเลิก
+    //   rejected/undone  → ไม่มีปุ่ม
+    let actionBtns = "";
     const dlUrl = withUidQS(`${location.origin}/api/export/payroll/${encodeURIComponent(p.payId)}`);
-    const dlBtn = !isUndone
-      ? `<a href="${dlUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;padding:5px 8px" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${dlUrl}','📥 Payroll ${p.payId}');}" title="ดาวน์โหลด">📥</a>`
-      : "";
-    const undoBtn = !isUndone
-      ? `<button class="btn btn-red btn-sm" style="padding:5px 8px" onclick="undoPayroll('${p.payId}')" title="ยกเลิก">↺</button>`
-      : "";
+    if (p.status === "approved") {
+      actionBtns = `<button class="btn btn-green btn-sm" style="padding:5px 10px" onclick="finalizePayroll('${p.payId}')" title="บันทึก+Download">💾</button>
+                    <button class="btn btn-red btn-sm" style="padding:5px 8px" onclick="undoPayroll('${p.payId}')" title="ยกเลิก">↺</button>`;
+    } else if (p.status === "active") {
+      actionBtns = `<a href="${dlUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;padding:5px 8px" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${dlUrl}','📥 Payroll ${p.payId}');}" title="ดาวน์โหลด">📥</a>
+                    <button class="btn btn-red btn-sm" style="padding:5px 8px" onclick="undoPayroll('${p.payId}')" title="ยกเลิก">↺</button>`;
+    }
+
     return `
-      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);${isUndone?'opacity:.6':''}">
-        <div style="font-size:16px">${ico}</div>
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);${dim}">
+        <div style="font-size:16px">${meta.icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
+          <div style="font-size:10px;color:${meta.color};font-weight:600">${meta.label}</div>
           <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${esc(p.createdBy)}</div>
-          ${isUndone ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิกเมื่อ ${p.undoneAt} โดย ${p.undoneBy||'-'}</div>` : ''}
+          ${p.status === "undone" ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิก ${p.undoneAt} โดย ${esc(p.undoneBy||'-')}</div>` : ''}
         </div>
-        ${dlBtn}
-        ${undoBtn}
+        ${actionBtns}
       </div>
     `;
   }).join("");
@@ -2311,11 +2396,17 @@ function renderSettingsEmps() {
     if (e.travelAllowance) extras.push(`💵+${e.travelAllowance.toLocaleString()}`);
     if (e.socialSecurity)  extras.push(`🏥-${e.socialSecurity.toLocaleString()}`);
     if (e.satHalfDay)      extras.push(`📅เสาร์ครึ่งวัน`);  // ★ v1.27
+    // ★ v1.32: badge role
+    const roleBadge = e.role === "admin"
+      ? `<span style="background:rgba(239,108,0,.2);color:#ffb74d;font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;margin-left:5px">ADMIN</span>`
+      : e.role === "supervisor"
+      ? `<span style="background:rgba(92,107,192,.2);color:#9fa8da;font-size:9px;padding:1px 6px;border-radius:8px;font-weight:700;margin-left:5px">หัวหน้า</span>`
+      : "";
     return `
     <div class="emp-row">
       <div class="emp-avatar" style="background:${EMP_COLORS[e.name.charCodeAt(0)%EMP_COLORS.length]}">${e.name.charAt(0)}</div>
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:600">${bound}${esc(e.name)}</div>
+        <div style="font-size:13px;font-weight:600">${bound}${esc(e.name)}${roleBadge}</div>
         <div style="font-size:10px;color:var(--sub)">${e.hourlyRate}฿/ชม. · หยุด${e.holidayFlat.toLocaleString()}${extras.length?' · '+extras.join(' '):''}</div>
       </div>
       <button class="btn btn-grey btn-sm" onclick="openEmpEdit(${i})">✏️</button>
@@ -2374,6 +2465,15 @@ function empFormFieldsHtml(e = {}) {
         <span>📅 เสาร์ครึ่งวัน <span style="color:var(--sub);font-size:11px">(ทำงาน 08:30-12:00 → ลง OT จาก 12:00 ได้)</span></span>
       </label>
     </div>
+    <!-- ★ v1.32: เลือก role -->
+    <div style="margin-top:10px">
+      <label>🏷️ บทบาทในระบบ</label>
+      <select id="eRole" style="width:100%;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:14px;font-family:inherit">
+        <option value=""           ${!e.role ? 'selected' : ''}>👷 พนักงานทั่วไป</option>
+        <option value="supervisor" ${e.role === 'supervisor' ? 'selected' : ''}>👔 หัวหน้างาน (เห็น Admin overview + อนุมัติ payroll)</option>
+        <option value="admin"      ${e.role === 'admin' ? 'selected' : ''}>🔐 Admin (เห็นทุกอย่าง — ใช้ env var ก็ได้)</option>
+      </select>
+    </div>
   `;
 }
 
@@ -2425,6 +2525,7 @@ function empFormReadValues() {
     travelAllowance: Number(document.getElementById("eTA")?.value || 0),
     socialSecurity: Number(document.getElementById("eSS")?.value || 0),
     satHalfDay: !!document.getElementById("eSat")?.checked,  // ★ v1.27
+    role: (document.getElementById("eRole")?.value || "").trim(),  // ★ v1.32
     userId: "",
   };
 }
@@ -2626,6 +2727,152 @@ async function deleteHol(i) {
   if (!res.ok) { const d = await res.json().catch(()=>({})); toast(d.error||"ลบไม่สำเร็จ","err"); return; }
   toast("🗑️ ลบแล้ว","ok"); await loadSettings();
   STATE.holidays = settingsHols;
+}
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.32: SUPERVISOR APPROVAL TAB
+// ══════════════════════════════════════════════════════════════
+let pendingPayrolls = [];
+
+async function refreshSupervisorBadge() {
+  try {
+    const res = await apiFetch("/api/payroll/pending");
+    if (!res.ok) return;
+    const data = await res.json();
+    const n = (data.items || []).length;
+    const badge = document.getElementById("supBadge");
+    if (n > 0) { badge.textContent = n; badge.style.display = "inline-block"; }
+    else { badge.style.display = "none"; }
+    pendingPayrolls = data.items || [];
+  } catch (_) {}
+}
+
+async function loadSupervisor() {
+  const el = document.getElementById("supervisor-content");
+  el.innerHTML = `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">กำลังโหลด...</div>`;
+  try {
+    const res = await apiFetch("/api/payroll/pending");
+    const data = await res.json();
+    if (!res.ok) {
+      el.innerHTML = `<div class="err-box" style="display:block">⚠️ ${esc(data.error||"โหลดไม่ได้")}</div>`;
+      return;
+    }
+    pendingPayrolls = data.items || [];
+    renderSupervisor();
+    refreshSupervisorBadge();
+  } catch (e) {
+    el.innerHTML = `<div class="err-box" style="display:block">⚠️ เชื่อมต่อไม่ได้</div>`;
+  }
+}
+
+function renderSupervisor() {
+  const el = document.getElementById("supervisor-content");
+  if (!pendingPayrolls.length) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-body" style="text-align:center;padding:40px 20px">
+          <div style="font-size:40px;margin-bottom:8px">🎉</div>
+          <div style="font-size:14px;font-weight:700;margin-bottom:4px">ไม่มีรอบรออนุมัติ</div>
+          <div style="font-size:11px;color:var(--sub)">เคลียร์เรียบร้อยแล้ว</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const html = pendingPayrolls.map(p => {
+    const summaryHtml = p.summary.map(s => {
+      const net = s.pay + s.travel - s.social;
+      return `
+        <div style="padding:6px 10px;border-bottom:1px solid var(--border);font-size:11px;display:flex;justify-content:space-between">
+          <div>
+            <b>${esc(s.name)}</b>
+            <span style="color:var(--sub);font-size:10px"> · ${s.days} วัน · ${s.hours} ชม. · หยุด/ตจว. ${s.holidays}</span>
+          </div>
+          <div style="text-align:right">
+            <span style="color:#81c784;font-weight:700">${net.toLocaleString()}฿</span>
+            ${(s.travel || s.social) ? `<div style="font-size:8px;color:var(--sub)">OT ${s.pay.toLocaleString()}${s.travel?` +${s.travel}`:""}${s.social?` -${s.social}`:""}</div>` : ""}
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="card" style="margin-bottom:12px;border:1px solid rgba(255,167,38,.3)">
+        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+          <span>⏳ รออนุมัติ — ${p.cutoff}</span>
+          <span style="font-size:9px;color:var(--sub)">${p.payId}</span>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+            <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+              <div style="font-size:18px;font-weight:800;color:#81c784">${p.records}</div>
+              <div style="font-size:9px;color:var(--sub)">รายการ</div>
+            </div>
+            <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+              <div style="font-size:18px;font-weight:800;color:#9fa8da">${p.employees}</div>
+              <div style="font-size:9px;color:var(--sub)">พนักงาน</div>
+            </div>
+            <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+              <div style="font-size:18px;font-weight:800;color:#ffd54f">${p.totalPay.toLocaleString()}</div>
+              <div style="font-size:9px;color:var(--sub)">บาท</div>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--sub);margin-bottom:6px">ส่งโดย ${esc(p.createdBy)} · ${p.createdAt}</div>
+          <div style="background:#141829;border-radius:10px;max-height:240px;overflow-y:auto">${summaryHtml}</div>
+          <div style="height:12px"></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-red btn-sm" style="flex:1" onclick="rejectPending('${p.payId}')">❌ ไม่อนุมัติ</button>
+            <button class="btn btn-green btn-sm" style="flex:2" onclick="approvePending('${p.payId}')">✅ อนุมัติ</button>
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+  el.innerHTML = html;
+}
+
+async function approvePending(payId) {
+  const ok = await confirmModal({
+    title: "อนุมัติรอบจ่าย?",
+    message: `อนุมัติ ${payId}\n\nหลังอนุมัติ admin จะกดบันทึก + ดาวน์โหลด Excel ได้`,
+    okText: "✅ อนุมัติ",
+  });
+  if (!ok) return;
+  const supName = STATE.empData?.name || STATE.displayName || "Supervisor";
+  try {
+    const res = await apiFetch(`/api/payroll/approve/${encodeURIComponent(payId)}`, {
+      method: "POST",
+      body: JSON.stringify({ approvedBy: supName }),
+    });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "อนุมัติไม่สำเร็จ", "err");
+    toast(`✅ อนุมัติ ${payId} แล้ว`, "ok");
+    await loadSupervisor();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+async function rejectPending(payId) {
+  const ok = await confirmModal({
+    title: "ไม่อนุมัติรอบจ่าย?",
+    message: `ไม่อนุมัติ ${payId}\n\nrecords จะกลับเป็น "ยังไม่จ่าย" ทั้งหมด — admin ต้องตรวจและขออนุมัติใหม่`,
+    okText: "❌ ไม่อนุมัติ",
+    danger: true,
+  });
+  if (!ok) return;
+  const supName = STATE.empData?.name || STATE.displayName || "Supervisor";
+  try {
+    const res = await apiFetch(`/api/payroll/reject/${encodeURIComponent(payId)}`, {
+      method: "POST",
+      body: JSON.stringify({ rejectedBy: supName }),
+    });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "ไม่สำเร็จ", "err");
+    toast(`❌ ไม่อนุมัติ ${payId} — ปลด ${data.recordsRestored} records กลับ`, "ok");
+    await loadSupervisor();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
 }
 
 // ══════════════════════════════════════════════════════════════

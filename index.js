@@ -192,6 +192,23 @@ function getAdminIds() {
   return (process.env.ADMIN_LINE_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
 }
 
+// ★ v1.32: helper — เช็คสิทธิ์ admin/supervisor จากทั้ง env + sheet
+//   admin   = (uid in ADMIN_LINE_IDS env) OR (employee role="admin")
+//   supervisor = (employee role="supervisor") OR is admin (admin includes supervisor power)
+async function getRoleForUser(uid) {
+  if (!uid) return "employee";
+  if (getAdminIds().includes(uid)) return "admin";
+  try {
+    const sheets = await getSheetsClient();
+    const employees = await getEmployees(sheets);
+    const emp = employees.find(e => e.userId === uid);
+    if (!emp) return "employee";
+    if (emp.role === "admin") return "admin";
+    if (emp.role === "supervisor") return "supervisor";
+    return "employee";
+  } catch (_) { return "employee"; }
+}
+
 function requireAdmin(req, res, next) {
   // ★ ฝั่ง client ส่ง header `x-line-user-id` (จาก liff.getProfile().userId)
   // — สำหรับ GET endpoint ที่ใช้ <a href> (download Excel) จะ fallback อ่านจาก ?_uid=
@@ -207,6 +224,22 @@ function requireAdmin(req, res, next) {
     return res.status(403).json({ error: "Forbidden — admin only" });
   }
   next();
+}
+
+// ★ v1.32: middleware สำหรับ supervisor — ผ่านได้ถ้า env-admin หรือ sheet role ∈ {admin, supervisor}
+async function requireSupervisor(req, res, next) {
+  try {
+    const uid = (req.headers["x-line-user-id"] || req.query._uid || "").toString().trim();
+    if (!uid) return res.status(403).json({ error: "Forbidden — supervisor only" });
+    if (getAdminIds().includes(uid)) return next();  // admin = supervisor power
+    const sheets = await getSheetsClient();
+    const employees = await getEmployees(sheets);
+    const emp = employees.find(e => e.userId === uid);
+    if (emp && (emp.role === "supervisor" || emp.role === "admin")) return next();
+    return res.status(403).json({ error: "Forbidden — supervisor only" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 }
 
 // verify LIFF ID token กับ LINE oauth2 endpoint
@@ -382,13 +415,18 @@ app.get("/api/me", async (req, res) => {
       }
     }
 
-    const isAdmin = admins.includes(userId);
+    const isAdmin = admins.includes(userId) || emp?.role === "admin";
+    // ★ v1.32: คำนวณ role — admin > supervisor > employee
+    let role = "employee";
+    if (isAdmin) role = "admin";
+    else if (emp?.role === "supervisor") role = "supervisor";
 
     res.json({
       found:       !!emp,
       name:        emp?.name || displayName || "",
       userId,
       isAdmin,
+      role,                       // ★ v1.32: "admin" | "supervisor" | "employee"
       hourlyRate:  emp?.hourlyRate  || 0,
       holidayFlat: emp?.holidayFlat || 0,
       matchedBy,
@@ -427,7 +465,7 @@ app.get("/api/employees", async (req, res) => {
 
 // ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
 app.post("/api/employees", requireAdmin, async (req, res) => {
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: "กรุณากรอกชื่อพนักงาน" });
   try {
     const sheets = await getSheetsClient();
@@ -436,9 +474,10 @@ app.post("/api/employees", requireAdmin, async (req, res) => {
     if (existing.some(e => e.name === String(name).trim())) {
       return res.status(400).json({ error: `มีพนักงานชื่อ "${name}" อยู่แล้วในระบบ` });
     }
+    const safeRole = ["admin","supervisor"].includes((role||"").toLowerCase()) ? role.toLowerCase() : "";
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: "Employees!A:H",  // ★ v1.27
+      range: "Employees!A:I",  // ★ v1.32: + col I role
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
@@ -446,6 +485,7 @@ app.post("/api/employees", requireAdmin, async (req, res) => {
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
         satHalfDay ? "TRUE" : "",  // ★ v1.27
+        safeRole,                  // ★ v1.32
       ]] },
     });
     res.json({ ok: true });
@@ -457,12 +497,13 @@ app.post("/api/employees", requireAdmin, async (req, res) => {
 // ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
 app.put("/api/employees/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role } = req.body;
   try {
     const sheets = await getSheetsClient();
+    const safeRole = ["admin","supervisor"].includes((role||"").toLowerCase()) ? role.toLowerCase() : "";
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Employees!A${row}:H${row}`,  // ★ v1.27
+      range: `Employees!A${row}:I${row}`,  // ★ v1.32: + col I role
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
@@ -470,6 +511,7 @@ app.put("/api/employees/:idx", requireAdmin, async (req, res) => {
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
         satHalfDay ? "TRUE" : "",  // ★ v1.27
+        safeRole,                  // ★ v1.32
       ]] },
     });
     res.json({ ok: true });
@@ -728,11 +770,13 @@ async function getEmployeesAlreadyPaidExtrasThisMonth(sheets, allRecords, cutoff
     logRows = r.data.values || [];
   } catch (_) { /* tab อาจยังไม่มี */ }
   const activePayIds = new Set();
+  // ★ v1.32: dedup includes pending_approval + approved (records lock แล้ว)
+  const dedupStatuses = new Set(["pending_approval", "approved", "active"]);
   logRows.forEach(row => {
     const payId    = (row[0] || "").trim();
     const cutoffStr= (row[1] || "").trim();
     const status   = (row[7] || "active").trim();
-    if (payId && status === "active" && cutoffStr.endsWith(monthKey)) {
+    if (payId && dedupStatuses.has(status) && cutoffStr.endsWith(monthKey)) {
       activePayIds.add(payId);
     }
   });
@@ -816,7 +860,10 @@ app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /api/payroll/commit — Confirm จ่าย → mark column K ─
+// ── POST /api/payroll/commit — ★ v1.32: เปลี่ยนเป็น "submit for approval" ────
+//   - mark records กับ payId แล้ว (lock)
+//   - log status = "pending_approval" (รอ supervisor อนุมัติ)
+//   - finalize ทำใน /api/payroll/finalize (admin คนเดิม)
 app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
   const { cutoff, createdBy } = req.body;
   if (!cutoff || !/^\d{2}\/\d{2}\/\d{4}$/.test(cutoff)) {
@@ -876,6 +923,7 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
     const totalPay = grossOT + totalTravel - totalSocial;  // net
 
     // เขียน Payroll_Log (ถ้า tab มีอยู่)
+    // ★ v1.32: status = "pending_approval" (เดิม "active")
     try {
       await sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
@@ -884,7 +932,7 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
         resource: { values: [[
           payId, cutoff, nowStr,
           pending.length, employeeNames.size, totalPay,
-          createdBy || "Admin", "active", "", "",
+          createdBy || "Admin", "pending_approval", "", "",
         ]] },
       });
     } catch (logErr) {
@@ -895,7 +943,8 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
       ok: true,
       payId,
       cutoff,
-      committedAt: nowStr,
+      submittedAt: nowStr,
+      status: "pending_approval",   // ★ v1.32: client แสดงสถานะ "รอ supervisor"
       records: pending.length,
       employees: employeeNames.size,
       grossOT,
@@ -972,6 +1021,168 @@ app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
       logCleanedOnly: target.length === 0,
       logRowsUpdated: logUpdated,
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.32: APPROVAL FLOW ENDPOINTS
+//   - /approve/:payId   : supervisor → status pending_approval → approved
+//   - /reject/:payId    : supervisor → ปลด records, status → rejected
+//   - /finalize/:payId  : admin → status approved → active (จบ flow)
+// ══════════════════════════════════════════════════════════════
+
+// helper: หา row ของ payId ใน Payroll_Log
+async function findPayrollLogRow(sheets, payId) {
+  const r = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Payroll_Log!A3:J5000",
+  });
+  const rows = r.data.values || [];
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i][0] || "").trim() === payId) {
+      return { idx: i, row: rows[i], rowNum: i + 3 };  // rowNum = sheet row (1-based, header offset)
+    }
+  }
+  return null;
+}
+
+// ── POST /api/payroll/approve/:payId — Supervisor อนุมัติ
+app.post("/api/payroll/approve/:payId", requireSupervisor, async (req, res) => {
+  const { payId } = req.params;
+  const { approvedBy } = req.body || {};
+  try {
+    const sheets = await getSheetsClient();
+    const found = await findPayrollLogRow(sheets, payId);
+    if (!found) return res.status(404).json({ error: `ไม่พบรอบ ${payId}` });
+    const status = (found.row[7] || "").trim();
+    if (status !== "pending_approval") {
+      return res.status(400).json({ error: `รอบนี้สถานะ "${status}" — อนุมัติไม่ได้` });
+    }
+    const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+    // เขียน status (col H) + lastActionAt (col I) + lastActionBy (col J)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Payroll_Log!H${found.rowNum}:J${found.rowNum}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [["approved", now, approvedBy || "Supervisor"]] },
+    });
+    res.json({ ok: true, payId, status: "approved", approvedAt: now, approvedBy: approvedBy || "Supervisor" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/payroll/reject/:payId — Supervisor ไม่อนุมัติ → ปลด records กลับ unpaid
+app.post("/api/payroll/reject/:payId", requireSupervisor, async (req, res) => {
+  const { payId } = req.params;
+  const { rejectedBy, reason } = req.body || {};
+  try {
+    const sheets = await getSheetsClient();
+    const found = await findPayrollLogRow(sheets, payId);
+    if (!found) return res.status(404).json({ error: `ไม่พบรอบ ${payId}` });
+    const status = (found.row[7] || "").trim();
+    if (status !== "pending_approval") {
+      return res.status(400).json({ error: `รอบนี้สถานะ "${status}" — ไม่อนุมัติได้เฉพาะ pending_approval` });
+    }
+
+    // ปลด records (clear column K — paidAt)
+    const all = await getAllRecords(sheets);
+    const target = all.filter(r => r.paidAt === payId);
+    if (target.length > 0) {
+      const updates = target.map(r => ({
+        range: `OT_Records!K${idxToRow(r.idx)}`,
+        values: [[""]],
+      }));
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: { valueInputOption: "USER_ENTERED", data: updates },
+      });
+    }
+
+    const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+    const note = (rejectedBy || "Supervisor") + (reason ? ` (${reason})` : "");
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Payroll_Log!H${found.rowNum}:J${found.rowNum}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [["rejected", now, note]] },
+    });
+    res.json({ ok: true, payId, status: "rejected", recordsRestored: target.length, rejectedAt: now });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/payroll/finalize/:payId — Admin บันทึก+download หลัง approved
+app.post("/api/payroll/finalize/:payId", requireAdmin, async (req, res) => {
+  const { payId } = req.params;
+  const { finalizedBy } = req.body || {};
+  try {
+    const sheets = await getSheetsClient();
+    const found = await findPayrollLogRow(sheets, payId);
+    if (!found) return res.status(404).json({ error: `ไม่พบรอบ ${payId}` });
+    const status = (found.row[7] || "").trim();
+    if (status !== "approved") {
+      return res.status(400).json({ error: `รอบนี้สถานะ "${status}" — ต้อง approved ก่อนถึง finalize ได้` });
+    }
+    const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Payroll_Log!H${found.rowNum}:J${found.rowNum}`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [["active", now, finalizedBy || "Admin"]] },
+    });
+    res.json({ ok: true, payId, status: "active", finalizedAt: now });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/payroll/pending — Supervisor: list รอบ pending_approval + records
+app.get("/api/payroll/pending", requireSupervisor, async (req, res) => {
+  try {
+    const sheets = await getSheetsClient();
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID, range: "Payroll_Log!A3:J5000",
+    });
+    const logRows = (r.data.values || []).map((row, i) => ({
+      idx: i, payId: (row[0]||"").trim(), cutoff: (row[1]||"").trim(),
+      createdAt: row[2] || "", records: Number(row[3]) || 0,
+      employees: Number(row[4]) || 0, totalPay: Number(row[5]) || 0,
+      createdBy: row[6] || "", status: (row[7]||"").trim(),
+    })).filter(p => p.payId && p.status === "pending_approval");
+
+    // attach summary per payId
+    const all = await getAllRecords(sheets);
+    const employees = await getEmployees(sheets);
+    const empMap = {};
+    employees.forEach(e => empMap[e.name] = e);
+
+    const items = logRows.map(p => {
+      const recs = all.filter(r => r.paidAt === p.payId);
+      const byEmp = {};
+      recs.forEach(r => {
+        byEmp[r.name] = byEmp[r.name] || { name: r.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+        byEmp[r.name].days.add(r.date);
+        byEmp[r.name].count += 1;
+        byEmp[r.name].pay   += r.pay;
+        if (r.otType === "วันธรรมดา") byEmp[r.name].hours += r.hours;
+        else                          byEmp[r.name].holidays += 1;
+      });
+      const summary = Object.values(byEmp).map(e => {
+        const ed = empMap[e.name] || {};
+        return {
+          name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
+          holidays: e.holidays, pay: e.pay, count: e.count,
+          travel: ed.travelAllowance || 0, social: ed.socialSecurity || 0,
+        };
+      }).sort((a,b) => b.pay - a.pay);
+      return { ...p, summary };
+    }).reverse(); // ใหม่บนสุด
+
+    res.json({ items });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1376,11 +1587,12 @@ app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
         const cParts = cutoff.split("/");
         const monthKey = `/${cParts[1]}/${cParts[2]}`;
         const otherActivePayIds = new Set();
+        const dedupStatuses = new Set(["pending_approval", "approved", "active"]);
         (pl.data.values || []).forEach(row => {
           const pid = (row[0]||"").trim();
           const cs  = (row[1]||"").trim();
           const st  = (row[7]||"active").trim();
-          if (pid && pid !== payId && st === "active" && cs.endsWith(monthKey)) {
+          if (pid && pid !== payId && dedupStatuses.has(st) && cs.endsWith(monthKey)) {
             otherActivePayIds.add(pid);
           }
         });
@@ -1582,7 +1794,7 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:H500",  // ★ v1.27: เพิ่ม column H (เสาร์ครึ่งวัน)
+    range: "Employees!A3:I500",  // ★ v1.32: เพิ่ม column I (role)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
@@ -1594,6 +1806,7 @@ async function getEmployees(sheets) {
     travelAllowance: Number(row[5]) || 0,    // ★ v1.25 (รายเดือน)
     socialSecurity:  Number(row[6]) || 0,    // ★ v1.25 (รายเดือน หัก)
     satHalfDay:      String(row[7] || "").toUpperCase() === "TRUE" || row[7] === true || row[7] === "1",  // ★ v1.27
+    role:           (row[8] || "").trim().toLowerCase(),  // ★ v1.32: "admin" | "supervisor" | ""
   })).filter(e => e.name);
 }
 
