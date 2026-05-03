@@ -1033,6 +1033,23 @@ app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
 //   - /finalize/:payId  : admin → status approved → active (จบ flow)
 // ══════════════════════════════════════════════════════════════
 
+// ★ v1.32 dual-approval helpers ─────────────────────────
+// list ของชื่อ supervisor ทั้งหมด (role==="supervisor" ใน Employees)
+async function getRequiredApprovers(sheets) {
+  const employees = await getEmployees(sheets);
+  return employees.filter(e => e.role === "supervisor").map(e => e.name);
+}
+// parse "Bow,Woot" → ["Bow","Woot"]
+function parseApprovers(str) {
+  return (str || "").split(",").map(s => s.trim()).filter(Boolean);
+}
+// resolve userId → employee name (สำหรับเก็บ approvers ลง sheet)
+async function getNameByUserId(sheets, uid) {
+  const employees = await getEmployees(sheets);
+  const e = employees.find(x => x.userId === uid);
+  return e ? e.name : "Unknown";
+}
+
 // helper: หา row ของ payId ใน Payroll_Log
 async function findPayrollLogRow(sheets, payId) {
   const r = await sheets.spreadsheets.values.get({
@@ -1048,10 +1065,10 @@ async function findPayrollLogRow(sheets, payId) {
   return null;
 }
 
-// ── POST /api/payroll/approve/:payId — Supervisor อนุมัติ
+// ── POST /api/payroll/approve/:payId — Supervisor อนุมัติ (dual-approval)
+//   ★ v1.32: ต้องมี supervisor ครบทุกคน (Bow + Woot ฯลฯ) ถึงจะ flip → approved
 app.post("/api/payroll/approve/:payId", requireSupervisor, async (req, res) => {
   const { payId } = req.params;
-  const { approvedBy } = req.body || {};
   try {
     const sheets = await getSheetsClient();
     const found = await findPayrollLogRow(sheets, payId);
@@ -1060,15 +1077,36 @@ app.post("/api/payroll/approve/:payId", requireSupervisor, async (req, res) => {
     if (status !== "pending_approval") {
       return res.status(400).json({ error: `รอบนี้สถานะ "${status}" — อนุมัติไม่ได้` });
     }
+    const uid = (req.headers["x-line-user-id"] || "").toString().trim();
+    const callerName = await getNameByUserId(sheets, uid);
+    const required   = await getRequiredApprovers(sheets);  // ["Bow","Woot"]
+    const current    = new Set(parseApprovers(found.row[9])); // col J → existing approvers
+
+    if (current.has(callerName)) {
+      return res.status(400).json({ error: `${callerName} อนุมัติรอบนี้ไปแล้ว` });
+    }
+    current.add(callerName);
+    const approversStr = [...current].join(",");
+
+    // ครบหรือยัง? (caller ที่ไม่ใช่ supervisor — ถือว่าช่วย approve แต่ไม่นับใน required)
+    const approvedRequired = required.filter(n => current.has(n));
+    const allRequiredDone  = required.length > 0 && approvedRequired.length === required.length;
+
     const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
-    // เขียน status (col H) + lastActionAt (col I) + lastActionBy (col J)
+    const newStatus = allRequiredDone ? "approved" : "pending_approval";
+    // เขียน H (status), I (lastActionAt), J (approvers comma-sep)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `Payroll_Log!H${found.rowNum}:J${found.rowNum}`,
       valueInputOption: "USER_ENTERED",
-      resource: { values: [["approved", now, approvedBy || "Supervisor"]] },
+      resource: { values: [[newStatus, now, approversStr]] },
     });
-    res.json({ ok: true, payId, status: "approved", approvedAt: now, approvedBy: approvedBy || "Supervisor" });
+    res.json({
+      ok: true, payId, status: newStatus,
+      approvedAt: now, approvedBy: callerName,
+      approvers: [...current],
+      required, remaining: required.filter(n => !current.has(n)),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1152,7 +1190,13 @@ app.get("/api/payroll/pending", requireSupervisor, async (req, res) => {
       createdAt: row[2] || "", records: Number(row[3]) || 0,
       employees: Number(row[4]) || 0, totalPay: Number(row[5]) || 0,
       createdBy: row[6] || "", status: (row[7]||"").trim(),
+      approvers: parseApprovers(row[9]),  // ★ v1.32: approvers list จาก col J
     })).filter(p => p.payId && p.status === "pending_approval");
+
+    // ★ v1.32: required approvers + caller — frontend ใช้ตัดสิน UI
+    const required = await getRequiredApprovers(sheets);
+    const callerUid = (req.headers["x-line-user-id"] || "").toString().trim();
+    const callerName = await getNameByUserId(sheets, callerUid);
 
     // attach summary per payId
     const all = await getAllRecords(sheets);
@@ -1182,7 +1226,7 @@ app.get("/api/payroll/pending", requireSupervisor, async (req, res) => {
       return { ...p, summary };
     }).reverse(); // ใหม่บนสุด
 
-    res.json({ items });
+    res.json({ items, required, callerName });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1196,23 +1240,29 @@ app.get("/api/payroll/history", requireAdmin, async (req, res) => {
       spreadsheetId: SHEET_ID,
       range: "Payroll_Log!A3:J5000",
     });
-    const rows = (r.data.values || []).map((row, i) => ({
-      idx: i,
-      payId: row[0] || "",
-      cutoff: row[1] || "",
-      createdAt: row[2] || "",
-      records: Number(row[3]) || 0,
-      employees: Number(row[4]) || 0,
-      totalPay: Number(row[5]) || 0,
-      createdBy: row[6] || "",
-      status: row[7] || "active",
-      undoneAt: row[8] || "",
-      undoneBy: row[9] || "",
-    })).filter(r => r.payId);
-    res.json({ history: rows.reverse() }); // ล่าสุดอยู่บน
+    // ★ v1.32: required approvers (สำหรับแสดง progress ในรายการ pending)
+    const required = await getRequiredApprovers(sheets);
+    const rows = (r.data.values || []).map((row, i) => {
+      const status = row[7] || "active";
+      const colJ = row[9] || "";  // approvers สำหรับ pending/approved, ชื่อสำหรับ rejected/undone
+      return {
+        idx: i,
+        payId: row[0] || "",
+        cutoff: row[1] || "",
+        createdAt: row[2] || "",
+        records: Number(row[3]) || 0,
+        employees: Number(row[4]) || 0,
+        totalPay: Number(row[5]) || 0,
+        createdBy: row[6] || "",
+        status,
+        undoneAt: row[8] || "",        // = lastActionAt
+        undoneBy: status === "undone" || status === "rejected" ? colJ : "",
+        approvers: (status === "pending_approval" || status === "approved") ? parseApprovers(colJ) : [],
+      };
+    }).filter(r => r.payId);
+    res.json({ history: rows.reverse(), required });  // ★ ส่ง required ด้วย
   } catch (e) {
-    // tab ไม่มีก็ส่ง array เปล่า
-    res.json({ history: [] });
+    res.json({ history: [], required: [] });
   }
 });
 

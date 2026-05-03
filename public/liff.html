@@ -2054,11 +2054,14 @@ async function finalizePayroll(payId) {
   }
 }
 
+let payrollRequired = [];   // ★ v1.32: required approvers จาก server
+
 async function loadPayrollHistory() {
   try {
     const res = await apiFetch("/api/payroll/history");
     const data = await res.json();
-    payrollHistory = data.history || [];
+    payrollHistory  = data.history  || [];
+    payrollRequired = data.required || [];
     renderPayrollHistory();
   } catch (e) {
     document.getElementById("payHistoryList").innerHTML = `<div style="padding:20px;text-align:center;color:#ef9a9a;font-size:12px">โหลดประวัติไม่ได้</div>`;
@@ -2134,14 +2137,26 @@ function renderPayrollHistory() {
                     <button class="btn btn-red btn-sm" style="padding:5px 8px" onclick="undoPayroll('${p.payId}')" title="ยกเลิก">↺</button>`;
     }
 
+    // ★ v1.32 dual: แสดง progress ของ pending
+    let progressLine = "";
+    if (p.status === "pending_approval" && payrollRequired.length) {
+      const approvers = p.approvers || [];
+      const chips = payrollRequired.map(name => {
+        const done = approvers.includes(name);
+        return `<span style="${done?'color:#81c784':'color:#ffb74d'}">${done?'✓':'⏳'} ${esc(name)}</span>`;
+      }).join(" · ");
+      progressLine = `<div style="font-size:9px">${chips}</div>`;
+    }
     return `
       <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);${dim}">
         <div style="font-size:16px">${meta.icon}</div>
         <div style="flex:1;min-width:0">
           <div style="font-size:12px;font-weight:600">${p.cutoff} <span style="font-size:9px;color:var(--sub)">(${p.payId})</span></div>
           <div style="font-size:10px;color:${meta.color};font-weight:600">${meta.label}</div>
+          ${progressLine}
           <div style="font-size:10px;color:var(--sub)">${p.records} รายการ · ${p.totalPay.toLocaleString()}฿ · ${p.employees} คน · โดย ${esc(p.createdBy)}</div>
           ${p.status === "undone" ? `<div style="font-size:9px;color:#ef9a9a">ยกเลิก ${p.undoneAt} โดย ${esc(p.undoneBy||'-')}</div>` : ''}
+          ${p.status === "rejected" ? `<div style="font-size:9px;color:#ef9a9a">ไม่อนุมัติ ${p.undoneAt} โดย ${esc(p.undoneBy||'-')}</div>` : ''}
         </div>
         ${actionBtns}
       </div>
@@ -2733,17 +2748,24 @@ async function deleteHol(i) {
 // ★ v1.32: SUPERVISOR APPROVAL TAB
 // ══════════════════════════════════════════════════════════════
 let pendingPayrolls = [];
+let supRequired = [];        // ★ v1.32 dual: list ของ supervisor ที่ต้องอนุมัติ
+let supCallerName = "";
 
 async function refreshSupervisorBadge() {
   try {
     const res = await apiFetch("/api/payroll/pending");
     if (!res.ok) return;
     const data = await res.json();
-    const n = (data.items || []).length;
+    const items = data.items || [];
+    pendingPayrolls = items;
+    supRequired   = data.required  || [];
+    supCallerName = data.callerName || "";
+    // ★ v1.32 dual: นับเฉพาะรอบที่ caller ยังไม่อนุมัติ
+    const myPending = items.filter(p => !((p.approvers||[]).includes(supCallerName)));
+    const n = myPending.length;
     const badge = document.getElementById("supBadge");
     if (n > 0) { badge.textContent = n; badge.style.display = "inline-block"; }
     else { badge.style.display = "none"; }
-    pendingPayrolls = data.items || [];
   } catch (_) {}
 }
 
@@ -2758,6 +2780,8 @@ async function loadSupervisor() {
       return;
     }
     pendingPayrolls = data.items || [];
+    supRequired     = data.required || [];
+    supCallerName   = data.callerName || "";
     renderSupervisor();
     refreshSupervisorBadge();
   } catch (e) {
@@ -2796,6 +2820,19 @@ function renderSupervisor() {
       `;
     }).join("");
 
+    // ★ v1.32 dual: progress chips
+    const approvers = p.approvers || [];
+    const required  = supRequired || [];
+    const progressChips = required.map(name => {
+      const done = approvers.includes(name);
+      return `<span style="display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;margin-right:5px;${done?'background:rgba(0,185,0,.15);color:#81c784':'background:rgba(255,167,38,.15);color:#ffb74d'}">${done?'✓':'⏳'} ${esc(name)}</span>`;
+    }).join("");
+
+    const callerApproved = approvers.includes(supCallerName);
+    const approveBtn = callerApproved
+      ? `<button class="btn btn-grey btn-sm" disabled style="flex:2;opacity:.5">✓ คุณอนุมัติแล้ว</button>`
+      : `<button class="btn btn-green btn-sm" style="flex:2" onclick="approvePending('${p.payId}')">✅ อนุมัติ</button>`;
+
     return `
       <div class="card" style="margin-bottom:12px;border:1px solid rgba(255,167,38,.3)">
         <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
@@ -2818,11 +2855,12 @@ function renderSupervisor() {
             </div>
           </div>
           <div style="font-size:10px;color:var(--sub);margin-bottom:6px">ส่งโดย ${esc(p.createdBy)} · ${p.createdAt}</div>
+          ${progressChips ? `<div style="margin-bottom:10px;font-size:10px;color:var(--sub)"><b>สถานะอนุมัติ:</b> ${progressChips}</div>` : ""}
           <div style="background:#141829;border-radius:10px;max-height:240px;overflow-y:auto">${summaryHtml}</div>
           <div style="height:12px"></div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-red btn-sm" style="flex:1" onclick="rejectPending('${p.payId}')">❌ ไม่อนุมัติ</button>
-            <button class="btn btn-green btn-sm" style="flex:2" onclick="approvePending('${p.payId}')">✅ อนุมัติ</button>
+            ${approveBtn}
           </div>
         </div>
       </div>`;
@@ -2833,19 +2871,24 @@ function renderSupervisor() {
 async function approvePending(payId) {
   const ok = await confirmModal({
     title: "อนุมัติรอบจ่าย?",
-    message: `อนุมัติ ${payId}\n\nหลังอนุมัติ admin จะกดบันทึก + ดาวน์โหลด Excel ได้`,
+    message: `อนุมัติ ${payId}\n\nต้องมีหัวหน้างานครบทุกคน ${supRequired.length?`(${supRequired.join(", ")})`:""} ถึงจะ admin บันทึก + ดาวน์โหลดได้`,
     okText: "✅ อนุมัติ",
   });
   if (!ok) return;
-  const supName = STATE.empData?.name || STATE.displayName || "Supervisor";
   try {
     const res = await apiFetch(`/api/payroll/approve/${encodeURIComponent(payId)}`, {
       method: "POST",
-      body: JSON.stringify({ approvedBy: supName }),
+      body: JSON.stringify({}),  // ★ v1.32: server หาชื่อจาก userId เอง
     });
     const data = await res.json();
     if (!res.ok) return toast(data.error || "อนุมัติไม่สำเร็จ", "err");
-    toast(`✅ อนุมัติ ${payId} แล้ว`, "ok");
+    // แจ้งผลตามสถานะ
+    if (data.status === "approved") {
+      toast(`🎯 ครบแล้ว — รอ admin บันทึก`, "ok");
+    } else {
+      const remain = (data.remaining || []).join(", ");
+      toast(`✓ บันทึก — รอ ${remain || "หัวหน้าคนอื่น"}`, "ok");
+    }
     await loadSupervisor();
   } catch (e) {
     toast("เชื่อมต่อไม่ได้", "err");
