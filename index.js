@@ -365,6 +365,10 @@ app.get("/api/me", async (req, res) => {
   let userId, displayName;
   let verified = false;
 
+  // ★ v1.32 fix: ลำดับการหา userId
+  //   1) ID token (verify ก่อน) → verified=true, auto-bind ทำได้
+  //   2) ถ้า token หมดอายุ/fail → fall back x-line-user-id header (verified=false, ไม่ auto-bind)
+  //   3) สุดท้าย legacy query string
   const auth = req.headers.authorization || "";
   const idToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
   if (idToken) {
@@ -374,13 +378,12 @@ app.get("/api/me", async (req, res) => {
       displayName = claims.name || "";
       verified = true;
     } else {
-      return res.status(401).json({ error: "Invalid LIFF ID token" });
+      console.warn("⚠️ /api/me ID token invalid — fall back to header");
     }
-  } else {
-    // legacy fallback — log warning to monitor migration
-    console.warn("⚠️ /api/me called without ID token — legacy mode");
-    userId = req.query.userId;
-    displayName = req.query.displayName;
+  }
+  if (!userId) {
+    userId = (req.headers["x-line-user-id"] || req.query.userId || "").toString().trim();
+    displayName = req.query.displayName || "";
   }
 
   try {
