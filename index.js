@@ -1965,35 +1965,40 @@ async function getDayHours(sheets, name, date) {
             .reduce((s, r) => s + r.hours, 0);
 }
 
-// ★ v1.21: ตรวจช่วงเวลาทับกับ record อื่นในวันเดียวกัน (เฉพาะ active = ยังไม่ undone)
+// ★ v1.21+v1.33: ตรวจช่วงเวลาทับกับ record อื่น
+//   v1.33: ครอบคลุม cross-day overlap — record วันก่อนหน้าที่ข้ามวันมาทับ + record วันถัดไปที่ shift ไปต้น
 async function findOverlappingRecord(sheets, name, date, newStart, newEnd) {
   const all = await getAllRecords(sheets);
-  const sameDay = all.filter(r =>
+  const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+
+  // หาวันก่อน + วันถัดไป (เพื่อครอบคลุม cross-day record)
+  const [dd, mm, yy] = date.split("/").map(Number);
+  const dt = new Date(yy - 543, mm - 1, dd);
+  const fmt = d => `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()+543}`;
+  const prevDate = fmt(new Date(dt.getTime() - 86400000));
+  const nextDate = fmt(new Date(dt.getTime() + 86400000));
+
+  const candidates = all.filter(r =>
     r.name === name &&
-    r.date === date &&
+    (r.date === date || r.date === prevDate || r.date === nextDate) &&
     r.otType === "วันธรรมดา" &&
     r.startTime !== "-" && r.endTime !== "-"
   );
 
-  // Convert ใหม่เป็น minutes
-  const toMin = t => {
-    const [h, m] = t.split(":").map(Number);
-    return h * 60 + m;
-  };
+  // แปลง new range → absolute timeline (อิงวันของ record ใหม่)
   let nS = toMin(newStart);
   let nE = toMin(newEnd);
   if (nE < nS) nE += 1440; // cross-midnight
 
-  for (const r of sameDay) {
+  for (const r of candidates) {
     let s = toMin(r.startTime);
     let e = toMin(r.endTime);
-    if (e < s) e += 1440;
-    // Ranges overlap iff nS < e && s < nE (also ลองเปรียบเทียบกับ +1440 และ -1440)
-    if ((nS < e && s < nE) ||
-        (nS + 1440 < e && s < nE + 1440) ||
-        (nS - 1440 < e && s < nE - 1440)) {
-      return r;
-    }
+    if (e < s) e += 1440; // record เก่าข้ามคืน
+    // Shift r ตามวัน — ให้อยู่บน timeline เดียวกับ new
+    if (r.date === prevDate)      { s -= 1440; e -= 1440; }
+    else if (r.date === nextDate) { s += 1440; e += 1440; }
+    // เช็ค overlap ปกติ
+    if (nS < e && s < nE) return r;
   }
   return null;
 }
