@@ -348,6 +348,8 @@ textarea{resize:none;height:70px}
             <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:18px">
               <span style="font-size:18px;color:var(--sub)">→</span>
               <div class="hours-pill" id="hoursPill" style="visibility:hidden">0 ชม.</div>
+              <!-- ★ v1.33: badge ข้ามวัน อยู่ใต้ pill -->
+              <div id="crossDayBadge" style="display:none;font-size:10px;font-weight:600;color:#9fa8da;background:rgba(92,107,192,.15);border:1px solid rgba(92,107,192,.3);border-radius:10px;padding:2px 8px;margin-top:2px;white-space:nowrap">🌙 ข้ามวัน</div>
             </div>
             <div style="text-align:center">
               <div class="time-label">สิ้นสุด OT</div>
@@ -903,8 +905,11 @@ function updateHours() {
   if (crossDay) mins += 24 * 60;
   const h = mins>0 ? +(mins/60).toFixed(2) : 0;
 
-  const pill = document.getElementById("hoursPill");
+  const pill  = document.getElementById("hoursPill");
+  const badge = document.getElementById("crossDayBadge");
   pill.style.visibility = h>0?"visible":"hidden";
+  // ★ v1.33: แสดง badge "🌙 ข้ามวัน" ใต้ pill เมื่อข้ามวันจริง
+  if (badge) badge.style.display = (crossDay && h>0) ? "inline-block" : "none";
 
   // ★ v1.6: เช็คเฉพาะทับเวลางานปกติ — ลงเวลาได้ทุกช่วง รวมเช้ามืด
   const overlap = h>0 && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM);
@@ -912,10 +917,10 @@ function updateHours() {
     pill.innerHTML = `⚠️ ทับเวลางาน`;
     pill.style.background = "rgba(239,83,80,.15)";
     pill.style.color = "#ef9a9a";
+    if (badge) badge.style.display = "none";
     return;
   }
-  const crossLabel = crossDay ? `<span style="font-size:9px;opacity:.7"> ข้ามวัน</span>` : "";
-  pill.innerHTML = `${h} ชม.${crossLabel}`;
+  pill.innerHTML = `${h} ชม.`;
   pill.style.background = "rgba(0,185,0,.15)";
   pill.style.color = "var(--green2)";
 }
