@@ -1270,8 +1270,9 @@ app.get("/api/payroll/history", requireAdmin, async (req, res) => {
   }
 });
 
-// ── GET /api/admin/records — ทุก record สำหรับ Admin ─────────
-app.get("/api/admin/records", requireAdmin, async (req, res) => {
+// ── GET /api/admin/records — records สำหรับ Admin + Supervisor (ดูภาพรวม)
+// ★ v1.32 fix: เปลี่ยนเป็น requireSupervisor — supervisor ต้องเห็นข้อมูลภาพรวม + กราฟ
+app.get("/api/admin/records", requireSupervisor, async (req, res) => {
   const { month, year } = req.query;
   try {
     const sheets = await getSheetsClient();
