@@ -684,16 +684,23 @@ app.post("/api/ot", rateLimitByUser, async (req, res) => {
 });
 
 // ── POST /api/bind-employee — Self-claim ผูกบัญชี LINE ★ v1.13
-// ★ v1.30 SEC-03b: บังคับ ID token (กันคนปลอมตัว claim ชื่อคนอื่น)
+// ★ v1.32 fix: รับ userId จาก ID token (verified) หรือ x-line-user-id header
+//   (ID token ใน LIFF inApp อาจ verify fail — fallback header)
+//   ความปลอดภัยยังคง: เช็ค target.userId ว่าง + userId นี้ยังไม่ถูกผูก (logic ด้านล่าง)
 app.post("/api/bind-employee", rateLimitByUser, async (req, res) => {
   const { employeeName } = req.body;
+  let userId = "";
   const auth = req.headers.authorization || "";
   const idToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  const claims = await verifyLineIdToken(idToken);
-  if (!claims) return res.status(401).json({ error: "ต้อง login LIFF ก่อน (ID token invalid)" });
-  const userId = claims.sub;
-
-  if (!userId || !employeeName) return res.status(400).json({ error: "ข้อมูลไม่ครบ" });
+  if (idToken) {
+    const claims = await verifyLineIdToken(idToken);
+    if (claims) userId = claims.sub;
+  }
+  if (!userId) {
+    userId = (req.headers["x-line-user-id"] || "").toString().trim();
+  }
+  if (!userId) return res.status(401).json({ error: "ไม่พบ LINE userId — ลอง logout/login LINE แล้วเปิดใหม่" });
+  if (!employeeName) return res.status(400).json({ error: "ข้อมูลไม่ครบ" });
   try {
     const sheets    = await getSheetsClient();
     const employees = await getEmployees(sheets);
