@@ -209,21 +209,25 @@ async function getRoleForUser(uid) {
   } catch (_) { return "employee"; }
 }
 
-function requireAdmin(req, res, next) {
-  // ★ ฝั่ง client ส่ง header `x-line-user-id` (จาก liff.getProfile().userId)
-  // — สำหรับ GET endpoint ที่ใช้ <a href> (download Excel) จะ fallback อ่านจาก ?_uid=
-  //   transitional measure — รอบถัดไปจะเปลี่ยนเป็น signed token / fetch+blob
-  // — สำหรับการป้องกันแบบเข้มขึ้น ใส่ verify ID token ใน Authorization header เพิ่ม
-  const uid = (
-    req.headers["x-line-user-id"] ||
-    req.query._uid ||
-    ""
-  ).toString().trim();
-  const admins = getAdminIds();
-  if (!uid || !admins.includes(uid)) {
+// ★ v1.32 fix: เช็ค admin จาก env หรือ sheet role="admin" (เดิม env เท่านั้น)
+async function requireAdmin(req, res, next) {
+  try {
+    const uid = (
+      req.headers["x-line-user-id"] ||
+      req.query._uid ||
+      ""
+    ).toString().trim();
+    if (!uid) return res.status(403).json({ error: "Forbidden — admin only" });
+    if (getAdminIds().includes(uid)) return next();
+    // เช็ค sheet role
+    const sheets = await getSheetsClient();
+    const employees = await getEmployees(sheets);
+    const emp = employees.find(e => e.userId === uid);
+    if (emp && emp.role === "admin") return next();
     return res.status(403).json({ error: "Forbidden — admin only" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  next();
 }
 
 // ★ v1.32: middleware สำหรับ supervisor — ผ่านได้ถ้า env-admin หรือ sheet role ∈ {admin, supervisor}
