@@ -2485,6 +2485,11 @@ function empFormFieldsHtml(e = {}) {
       <label>🏥 ประกันสังคม (฿/เดือน — หัก)</label>
       <input id="eSS" type="number" value="${e.socialSecurity ?? 0}">
     </div>
+    <!-- ★ v1.33: เงินเดือน (รายเดือน — รวมในรอบจ่าย, ไม่แสดงในแอพ) -->
+    <div style="margin-top:10px">
+      <label>💼 เงินเดือน (฿/เดือน — บวก) <span style="color:var(--sub);font-size:10px">รวมตอนสรุป payroll</span></label>
+      <input id="eSal" type="number" value="${e.salary ?? 0}">
+    </div>
     <div style="margin-top:10px;padding:10px;background:rgba(76,175,80,.08);border-radius:8px;border:1px solid rgba(76,175,80,.25)">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
         <input id="eSat" type="checkbox" ${e.satHalfDay ? 'checked' : ''} style="width:18px;height:18px;accent-color:#4caf50">
@@ -2552,6 +2557,7 @@ function empFormReadValues() {
     socialSecurity: Number(document.getElementById("eSS")?.value || 0),
     satHalfDay: !!document.getElementById("eSat")?.checked,  // ★ v1.27
     role: (document.getElementById("eRole")?.value || "").trim(),  // ★ v1.32
+    salary: Number(document.getElementById("eSal")?.value || 0),   // ★ v1.33
     userId: "",
   };
 }

@@ -472,7 +472,7 @@ app.get("/api/employees", async (req, res) => {
 
 // ── POST /api/employees — เพิ่มพนักงาน (Admin) ──────────────
 app.post("/api/employees", requireAdmin, async (req, res) => {
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role, salary } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: "กรุณากรอกชื่อพนักงาน" });
   try {
     const sheets = await getSheetsClient();
@@ -484,15 +484,16 @@ app.post("/api/employees", requireAdmin, async (req, res) => {
     const safeRole = ["admin","supervisor"].includes((role||"").toLowerCase()) ? role.toLowerCase() : "";
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: "Employees!A:I",  // ★ v1.32: + col I role
+      range: "Employees!A:J",  // ★ v1.33: + col J salary
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
         Number(outProvinceFlat) || 0,
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
-        satHalfDay ? "TRUE" : "",  // ★ v1.27
-        safeRole,                  // ★ v1.32
+        satHalfDay ? "TRUE" : "",
+        safeRole,
+        Number(salary) || 0,        // ★ v1.33
       ]] },
     });
     res.json({ ok: true });
@@ -504,21 +505,22 @@ app.post("/api/employees", requireAdmin, async (req, res) => {
 // ── PUT /api/employees/:idx — แก้ไขพนักงาน (Admin) ──────────
 app.put("/api/employees/:idx", requireAdmin, async (req, res) => {
   const row = idxToRow(Number(req.params.idx));
-  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role } = req.body;
+  const { name, hourlyRate, holidayFlat, userId, outProvinceFlat, travelAllowance, socialSecurity, satHalfDay, role, salary } = req.body;
   try {
     const sheets = await getSheetsClient();
     const safeRole = ["admin","supervisor"].includes((role||"").toLowerCase()) ? role.toLowerCase() : "";
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `Employees!A${row}:I${row}`,  // ★ v1.32: + col I role
+      range: `Employees!A${row}:J${row}`,  // ★ v1.33: + col J salary
       valueInputOption: "USER_ENTERED",
       resource: { values: [[
         name, hourlyRate, holidayFlat, userId || "",
         Number(outProvinceFlat) || 0,
         Number(travelAllowance) || 0,
         Number(socialSecurity) || 0,
-        satHalfDay ? "TRUE" : "",  // ★ v1.27
-        safeRole,                  // ★ v1.32
+        satHalfDay ? "TRUE" : "",
+        safeRole,
+        Number(salary) || 0,        // ★ v1.33
       ]] },
     });
     res.json({ ok: true });
@@ -838,18 +840,29 @@ app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
     });
     // ★ v1.25: เพิ่ม travelAllowance + หัก socialSecurity (รายเดือน — รวมในรอบจ่าย)
     // ★ v1.30 BUG-05: ถ้าจ่ายไปแล้วในเดือนเดียวกัน → travel=0, social=0
+    // ★ v1.33: salary ก็เป็น "monthly extras" เหมือน travel/social
     const empsAlreadyPaid = await getEmployeesAlreadyPaidExtrasThisMonth(sheets, all, cutoff);
+
+    // ★ v1.33: เพิ่ม employees ที่มี salary > 0 แต่ไม่มี OT records ใน round นี้
+    //   (เช่น เพิ่งเพิ่มเข้าระบบ เดือนนี้ไม่มี OT แต่ยังต้องได้เงินเดือน)
+    employees.forEach(e => {
+      if ((e.salary || 0) > 0 && !byEmp[e.name] && !empsAlreadyPaid.has(e.name)) {
+        byEmp[e.name] = { name: e.name, days: new Set(), hours: 0, holidays: 0, pay: 0, count: 0 };
+      }
+    });
+
     const summary = Object.values(byEmp).map(e => {
       const empData = empMap[e.name] || {};
       const skipExtras = empsAlreadyPaid.has(e.name);
       const travel = skipExtras ? 0 : (empData.travelAllowance || 0);
       const social = skipExtras ? 0 : (empData.socialSecurity || 0);
-      const netPay = e.pay + travel - social;
+      const salary = skipExtras ? 0 : (empData.salary || 0);     // ★ v1.33
+      const netPay = e.pay + travel + salary - social;
       return {
         name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
         holidays: e.holidays, pay: e.pay, count: e.count,
-        travel, social, netPay,
-        extrasSkipped: skipExtras,  // ★ ให้ client โชว์ note ได้
+        travel, social, salary, netPay,
+        extrasSkipped: skipExtras,
       };
     }).sort((a,b) => b.netPay - a.netPay);
 
@@ -859,6 +872,7 @@ app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
       totalPay: summary.reduce((s,e) => s+e.pay, 0),
       totalTravel: summary.reduce((s,e) => s+e.travel, 0),
       totalSocial: summary.reduce((s,e) => s+e.social, 0),
+      totalSalary: summary.reduce((s,e) => s+(e.salary||0), 0),  // ★ v1.33
       totalNet: summary.reduce((s,e) => s+e.netPay, 0),
       totalHours: +pending.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours,0).toFixed(2),
       totalHolidays: pending.filter(r=>r.otType!=="วันธรรมดา").length,
@@ -914,14 +928,30 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
       },
     });
 
-    // คำนวณยอด (รวม travel allowance + หัก social security)
-    const employeeNames = new Set(pending.map(r => r.name));
-    const grossOT  = pending.reduce((s,r) => s+r.pay, 0);
-    // ดึงพนักงานเพื่อคำนวณ travel + social
+    // คำนวณยอด (รวม travel allowance + เงินเดือน + หัก social security)
     const empList = await getEmployees(sheets);
-    // ★ v1.30 BUG-05: skip travel/social ถ้ารับไปแล้วในเดือนเดียวกัน
     const empsAlreadyPaid = await getEmployeesAlreadyPaidExtrasThisMonth(sheets, all, cutoff);
-    let totalTravel = 0, totalSocial = 0;
+
+    // ★ v1.33: เพิ่ม "พนักงานที่มี salary > 0 แต่ไม่มี OT รอบนี้" ที่ยังไม่ได้จ่าย salary เดือนนี้
+    //   → ใส่ records "เงินเดือน" ลง OT_Records ก่อน (paidAt = payId) เพื่อให้ dedup logic ครอบคลุม
+    const otEmployeeNames = new Set(pending.map(r => r.name));
+    const salaryRowsToAppend = [];
+    for (const e of empList) {
+      if ((e.salary || 0) <= 0) continue;
+      if (empsAlreadyPaid.has(e.name)) continue;
+      if (otEmployeeNames.has(e.name)) continue;  // มี OT แล้ว — รอบเดียวกันบวก salary ผ่าน totalSalary
+      // เพิ่ม dummy record "เงินเดือน" เพื่อ track การจ่าย
+      salaryRowsToAppend.push([
+        e.name, cutoff, "-", "-", 0, "เงินเดือน (auto)", "",
+        "เงินเดือน", e.salary, new Date().toLocaleString("th-TH",{timeZone:"Asia/Bangkok"}),
+      ]);
+    }
+
+    const employeeNames = new Set(pending.map(r => r.name));
+    salaryRowsToAppend.forEach((_, i) => employeeNames.add(salaryRowsToAppend[i][0]));
+    const grossOT  = pending.reduce((s,r) => s+r.pay, 0);
+
+    let totalTravel = 0, totalSocial = 0, totalSalary = 0;
     let extrasSkippedCount = 0;
     for (const name of employeeNames) {
       if (empsAlreadyPaid.has(name)) { extrasSkippedCount++; continue; }
@@ -929,15 +959,35 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
       if (e) {
         totalTravel += e.travelAllowance || 0;
         totalSocial += e.socialSecurity || 0;
+        totalSalary += e.salary || 0;
       }
     }
     if (extrasSkippedCount > 0) {
-      console.log(`💡 Skip travel/social สำหรับ ${extrasSkippedCount} คน (จ่ายไปแล้วในเดือนนี้)`);
+      console.log(`💡 Skip travel/social/salary สำหรับ ${extrasSkippedCount} คน (จ่ายไปแล้วในเดือนนี้)`);
     }
-    const totalPay = grossOT + totalTravel - totalSocial;  // net
+    const totalPay = grossOT + totalTravel + totalSalary - totalSocial;  // net
+
+    // ★ v1.33: append "salary records" สำหรับพนักงานที่ไม่มี OT รอบนี้แต่ต้องรับเงินเดือน
+    //   ใส่ paidAt (col K) ตรง ๆ → dedup logic เห็นทันที
+    if (salaryRowsToAppend.length > 0) {
+      // เพิ่ม payId เป็น col K
+      const rowsWithPayId = salaryRowsToAppend.map(r => [...r, payId]);
+      try {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: SHEET_ID,
+          range: "OT_Records!A:K",
+          valueInputOption: "USER_ENTERED",
+          resource: { values: rowsWithPayId },
+        });
+        console.log(`💼 เพิ่ม salary records ${salaryRowsToAppend.length} แถว`);
+      } catch (e) {
+        console.error("Append salary records failed:", e.message);
+      }
+    }
 
     // เขียน Payroll_Log (ถ้า tab มีอยู่)
     // ★ v1.32: status = "pending_approval" (เดิม "active")
+    const totalRecords = pending.length + salaryRowsToAppend.length;  // ★ v1.33
     try {
       await sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
@@ -945,7 +995,7 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
         valueInputOption: "USER_ENTERED",
         resource: { values: [[
           payId, cutoff, nowStr,
-          pending.length, employeeNames.size, totalPay,
+          totalRecords, employeeNames.size, totalPay,
           createdBy || "Admin", "pending_approval", "", "",
         ]] },
       });
@@ -958,12 +1008,13 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
       payId,
       cutoff,
       submittedAt: nowStr,
-      status: "pending_approval",   // ★ v1.32: client แสดงสถานะ "รอ supervisor"
-      records: pending.length,
+      status: "pending_approval",
+      records: totalRecords,        // ★ v1.33
       employees: employeeNames.size,
       grossOT,
       totalTravel,
       totalSocial,
+      totalSalary,                  // ★ v1.33
       totalPay,
     });
   } catch (e) {
@@ -1536,18 +1587,19 @@ app.get("/api/export/monthly", requireAdmin, async (req, res) => {
       const ed = empMapM[e.name] || {};
       const travel = ed.travelAllowance || 0;
       const social = ed.socialSecurity || 0;
-      const netPay = e.pay + travel - social;
+      const salary = ed.salary || 0;     // ★ v1.33
+      const netPay = e.pay + travel + salary - social;
       return { name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
-               holidays: e.holidays, pay: e.pay, count: e.count, travel, social, netPay };
+               holidays: e.holidays, pay: e.pay, count: e.count, travel, social, salary, netPay };
     }).sort((a,b) => b.netPay - a.netPay);
 
     const sumRows = [
       [`สรุป OT — เดือน ${mm}/${yy}` + (employee ? ` — ${employee}` : "")],
       [],
-      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","- ประกันสังคม","สุทธิ (฿)"],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","+ เงินเดือน","- ประกันสังคม","สุทธิ (฿)"],
     ];
     summary.forEach((e, i) => sumRows.push([
-      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.social, e.netPay,
+      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.salary, e.social, e.netPay,
     ]));
     sumRows.push([]);
     sumRows.push([
@@ -1557,13 +1609,13 @@ app.get("/api/export/monthly", requireAdmin, async (req, res) => {
       summary.reduce((s,e)=>s+e.holidays,0),
       summary.reduce((s,e)=>s+e.pay,0),
       summary.reduce((s,e)=>s+e.travel,0),
+      summary.reduce((s,e)=>s+(e.salary||0),0),  // ★ v1.33
       summary.reduce((s,e)=>s+e.social,0),
       summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
-    // merge title row across columns
-    ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }];
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
+    ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 9 } }];
     styleSheet(ws1, { titleRow: 0, headerRow: 2 });
     applyA4Print(ws1, { orientation: "landscape" });
     XLSX.utils.book_append_sheet(wb, ws1, "สรุป");
@@ -1673,20 +1725,21 @@ app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
       const skipExtras = empsPaidExtrasOtherRound.has(e.name);
       const travel = skipExtras ? 0 : (ed.travelAllowance || 0);
       const social = skipExtras ? 0 : (ed.socialSecurity || 0);
-      const netPay = e.pay + travel - social;
+      const salary = skipExtras ? 0 : (ed.salary || 0);    // ★ v1.33
+      const netPay = e.pay + travel + salary - social;
       return { name: e.name, days: e.days.size, hours: +e.hours.toFixed(2),
-               holidays: e.holidays, pay: e.pay, travel, social, netPay };
+               holidays: e.holidays, pay: e.pay, travel, social, salary, netPay };
     }).sort((a,b) => b.netPay - a.netPay);
 
     const sumRows = [
-      ["ใบรายการจ่าย OT"],
+      ["ใบรายการจ่าย OT + เงินเดือน"],
       ["รอบจ่าย:", cutoff, "", "Payroll ID:", payId],
       ["จัดทำเมื่อ:", createdAt, "", "ทำโดย:", createdBy],
       [],
-      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","- ประกันสังคม","สุทธิ (฿)"],
+      ["ลำดับ","ชื่อพนักงาน","จำนวนวัน","ชั่วโมง","วันหยุด/ตจว.","ค่า OT (฿)","+ ค่าเดินทาง","+ เงินเดือน","- ประกันสังคม","สุทธิ (฿)"],
     ];
     summary.forEach((e, i) => sumRows.push([
-      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.social, e.netPay,
+      i+1, e.name, e.days, e.hours, e.holidays, e.pay, e.travel, e.salary, e.social, e.netPay,
     ]));
     sumRows.push([]);
     sumRows.push([
@@ -1696,14 +1749,14 @@ app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
       summary.reduce((s,e)=>s+e.holidays,0),
       summary.reduce((s,e)=>s+e.pay,0),
       summary.reduce((s,e)=>s+e.travel,0),
+      summary.reduce((s,e)=>s+(e.salary||0),0),  // ★ v1.33
       summary.reduce((s,e)=>s+e.social,0),
       summary.reduce((s,e)=>s+e.netPay,0),
     ]);
     const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
-    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
-    // merge title + meta rows
+    ws1["!cols"] = [{wch:8},{wch:18},{wch:10},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14},{wch:14}];
     ws1["!merges"] = [
-      { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },  // title
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 9 } },  // title (10 cols)
     ];
     styleSheet(ws1, { titleRow: 0, headerRow: 4 });
     applyA4Print(ws1, { orientation: "landscape" });
@@ -1785,7 +1838,8 @@ app.get("/api/export/payroll/:payId", requireAdmin, async (req, res) => {
       // สรุปจ่าย
       rows.push(["─── สรุปจ่าย ───"]);
       rows.push(["+ ค่า OT", "", "", "", "", "", "", "", emp.pay]);
-      if (emp.travel) rows.push(["+ ค่าเดินทาง", "", "", "", "", "", "", "", emp.travel]);
+      if (emp.travel) rows.push(["+ ค่าเดินทาง/พิเศษ", "", "", "", "", "", "", "", emp.travel]);
+      if (emp.salary) rows.push(["+ เงินเดือน", "", "", "", "", "", "", "", emp.salary]);   // ★ v1.33
       if (emp.social) rows.push(["- ประกันสังคม", "", "", "", "", "", "", "", -emp.social]);
       rows.push(["ทำจ่ายสุทธิ", "", "", "", "", "", "", "", emp.netPay]);
       rows.push([]);
@@ -1859,7 +1913,7 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:I500",  // ★ v1.32: เพิ่ม column I (role)
+    range: "Employees!A3:J500",  // ★ v1.33: เพิ่ม column J (salary)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
@@ -1870,8 +1924,9 @@ async function getEmployees(sheets) {
     outProvinceFlat: Number(row[4]) || 0,    // ★ v1.25
     travelAllowance: Number(row[5]) || 0,    // ★ v1.25 (รายเดือน)
     socialSecurity:  Number(row[6]) || 0,    // ★ v1.25 (รายเดือน หัก)
-    satHalfDay:      String(row[7] || "").toUpperCase() === "TRUE" || row[7] === true || row[7] === "1",  // ★ v1.27
-    role:           (row[8] || "").trim().toLowerCase(),  // ★ v1.32: "admin" | "supervisor" | ""
+    satHalfDay:      String(row[7] || "").toUpperCase() === "TRUE" || row[7] === true || row[7] === "1",
+    role:           (row[8] || "").trim().toLowerCase(),  // ★ v1.32
+    salary:          Number(row[9]) || 0,    // ★ v1.33: เงินเดือนรายเดือน (จ่ายครั้งเดียวต่อเดือน)
   })).filter(e => e.name);
 }
 
