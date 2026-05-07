@@ -374,6 +374,15 @@ textarea{resize:none;height:70px}
               </div>
             </div>
           </div>
+
+          <!-- ★ v1.36 Phase 2: shift selector — โผล่เฉพาะ start hour 0-5 -->
+          <div id="shiftSelector" style="display:none;margin-top:14px;padding:10px;background:rgba(92,107,192,.08);border:1px solid rgba(92,107,192,.3);border-radius:10px">
+            <div style="font-size:11px;color:#9fa8da;margin-bottom:8px;text-align:center">⚠️ เลือกประเภทช่วงเวลา (บังคับเลือก)</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <button id="shiftBtnEarly" type="button" class="day-type-btn" onclick="setShiftMode('early')">🌅 เช้ามืด<div style="font-size:9px;font-weight:400;opacity:.85;margin-top:2px">(ของวันที่เลือก)</div></button>
+              <button id="shiftBtnNight" type="button" class="day-type-btn" onclick="setShiftMode('night')">🌙 กลางคืน<div style="font-size:9px;font-weight:400;opacity:.85;margin-top:2px">(ข้ามจากเมื่อวาน)</div></button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -554,6 +563,7 @@ let STATE = {
   empData: null, holidays: [],
   selDate: "", selDow: 0,
   startH: 18, startM: 0, endH: 20, endM: 0,
+  shiftMode: "",  // ★ v1.36 Phase 2: "" | "early" | "night" (โผล่เฉพาะตอน startH 0-5)
   calYear: 0, calMonth: 0,
   myMonth: "", myYear: "",
   adminSub: "overview", settingsSub: "employees",
@@ -999,11 +1009,44 @@ function updateHours() {
     pill.style.background = "rgba(239,83,80,.15)";
     pill.style.color = "#ef9a9a";
     if (badge) badge.style.display = "none";
-    return;
+  } else {
+    pill.innerHTML = `${h} ชม.`;
+    pill.style.background = "rgba(0,185,0,.15)";
+    pill.style.color = "var(--green2)";
   }
-  pill.innerHTML = `${h} ชม.`;
-  pill.style.background = "rgba(0,185,0,.15)";
-  pill.style.color = "var(--green2)";
+
+  // ★ v1.36 Phase 2: แสดง/ซ่อน shift selector ตาม startH
+  updateShiftSelector();
+}
+
+// ★ v1.36 Phase 2: shift mode (เช้ามืด vs กลางคืน) ─────────
+function setShiftMode(mode) {
+  STATE.shiftMode = mode;
+  const btnE = document.getElementById("shiftBtnEarly");
+  const btnN = document.getElementById("shiftBtnNight");
+  if (btnE) btnE.classList.toggle("active", mode === "early");
+  if (btnN) btnN.classList.toggle("active", mode === "night");
+}
+
+function updateShiftSelector() {
+  const sel = document.getElementById("shiftSelector");
+  if (!sel) return;
+  // โผล่เฉพาะ startH 0-5 + endH ต้อง ≥ startH (ไม่ใช่ cross-day)
+  const isEarlyMorning = STATE.startH >= 0 && STATE.startH <= 5;
+  const isCrossDay = (STATE.endH * 60 + STATE.endM) < (STATE.startH * 60 + STATE.startM);
+  const shouldShow = isEarlyMorning && !isCrossDay;
+
+  if (shouldShow) {
+    sel.style.display = "block";
+  } else {
+    sel.style.display = "none";
+    // reset state เมื่อหมุนออกจากช่วงเวลานี้
+    if (STATE.shiftMode) {
+      STATE.shiftMode = "";
+      document.getElementById("shiftBtnEarly")?.classList.remove("active");
+      document.getElementById("shiftBtnNight")?.classList.remove("active");
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1032,6 +1075,14 @@ async function submitOT() {
     return showErr(errBox, "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้");
   }
 
+  // ★ v1.36 Phase 2: ถ้า shift selector visible → ต้องเลือก
+  const shiftSelVisible = !isHol && !isOutProvince &&
+    document.getElementById("shiftSelector")?.style.display === "block";
+  if (shiftSelVisible && !STATE.shiftMode) {
+    return showErr(errBox, "เวลาเริ่มอยู่ช่วงเช้าตรู่ — กรุณาเลือก 🌅 เช้ามืด หรือ 🌙 กลางคืน");
+  }
+  const nightShift = STATE.shiftMode === "night";
+
   const btn = document.querySelector("#sec-record .btn-green");
   btn.textContent = "กำลังบันทึก...";
   btn.disabled = true;
@@ -1043,6 +1094,7 @@ async function submitOT() {
         name: STATE.empData.name, date: STATE.selDate,
         startTime, endTime, task, location: loc,
         otType: isOutProvince ? "outProvince" : (isHol ? "holiday" : "weekday"),
+        nightShift,   // ★ v1.36 Phase 2
       }),
     });
     const data = await res.json();
@@ -1059,6 +1111,10 @@ async function submitOT() {
     // ★ v1.25: reset out-of-province checkbox
     const opc = document.getElementById("outProvinceCheck");
     if (opc) { opc.checked = false; toggleOutProvince(); }
+    // ★ v1.36 Phase 2: reset shift mode
+    STATE.shiftMode = "";
+    document.getElementById("shiftBtnEarly")?.classList.remove("active");
+    document.getElementById("shiftBtnNight")?.classList.remove("active");
     setToday();
   } catch (e) {
     showErr(errBox, "เชื่อมต่อไม่ได้ กรุณาลองใหม่");
