@@ -1233,6 +1233,7 @@ function renderMyOT(records) {
             ${isLeave
               ? `<span class="badge badge-leave">${leaveIcon} ${r.otType}</span>`
               : `<span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:'🌅 '+r.otType}</span>
+                 ${r.nightShift ? `<span class="badge" style="background:rgba(92,107,192,.15);color:#9fa8da;font-weight:700">🌙 กลางคืน</span>` : ""}
                  ${isPaid ? `<span class="badge badge-ok" title="${r.paidAt}">✅ จ่ายแล้ว</span>` : `<span class="badge badge-pend">⏳ รอจ่าย</span>`}`}
           </div>
           ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis">📝 ${esc(r.task)}${r.location?" · 📍"+r.location:""}</div>`:""}
@@ -1256,14 +1257,15 @@ function renderMyOTHeatmap(records) {
   const firstDow = new Date(yearG, monthIdx, 1).getDay();
   const daysIn   = new Date(yearG, monthIdx+1, 0).getDate();
 
-  // group by day — ★ v1.35: รองรับ leave
+  // group by day — ★ v1.35: รองรับ leave; ★ v1.36 Phase 3: รองรับ nightShift
   const byDay = {};
   records.forEach(r => {
     const day = Number(r.date.split("/")[0]);
-    byDay[day] = byDay[day] || { wHrs: 0, hol: false, leave: null };
+    byDay[day] = byDay[day] || { wHrs: 0, hol: false, leave: null, night: false };
     if (r._isLeave)                         byDay[day].leave = r.otType;
     else if (r.otType === "วันธรรมดา")        byDay[day].wHrs += r.hours;
     else                                     byDay[day].hol = true;
+    if (r.nightShift) byDay[day].night = true;  // ★ v1.36 Phase 3
   });
 
   let html = '<div class="heatmap-grid">';
@@ -1288,7 +1290,7 @@ function renderMyOTHeatmap(records) {
       } else if (data.wHrs > 0) {
         const lvl = data.wHrs >= 5 ? 3 : data.wHrs >= 3 ? 2 : 1;
         cls += ` l${lvl}`;
-        extra = `<span class="heatmap-day-h">${+data.wHrs.toFixed(1)}h</span>`;
+        extra = `<span class="heatmap-day-h">${+data.wHrs.toFixed(1)}h${data.night ? " 🌙" : ""}</span>`;  // ★ v1.36 Phase 3
       }
     }
     html += `<div class="${cls}"><span class="heatmap-day-num">${d}</span>${extra}</div>`;
@@ -1303,6 +1305,7 @@ function renderMyOTHeatmap(records) {
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.85)"></span>5 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(255,213,79,.3)"></span>วันหยุด 🌅</span>
       <span class="heatmap-legend-item"><span class="leave-pill" style="width:14px;height:14px;font-size:8px"></span>วันลา</span>
+      <span class="heatmap-legend-item">🌙 กลางคืน</span>
     </div>
   `;
 
@@ -1681,10 +1684,11 @@ function renderAdminHeatmap(name, records) {
   const byDay = {};
   records.forEach(r => {
     const day = Number(r.date.split("/")[0]);
-    byDay[day] = byDay[day] || { wHrs: 0, hol: false, leave: null };
+    byDay[day] = byDay[day] || { wHrs: 0, hol: false, leave: null, night: false };
     if (r._isLeave)                         byDay[day].leave = r.otType;
     else if (r.otType === "วันธรรมดา")        byDay[day].wHrs += r.hours;
     else                                     byDay[day].hol = true;
+    if (r.nightShift) byDay[day].night = true;  // ★ v1.36 Phase 3
   });
 
   let html = '<div class="heatmap-grid">';
@@ -1709,7 +1713,7 @@ function renderAdminHeatmap(name, records) {
       } else if (data.wHrs > 0) {
         const lvl = data.wHrs >= 5 ? 3 : data.wHrs >= 3 ? 2 : 1;
         cls += ` l${lvl}`;
-        extra = `<span class="heatmap-day-h">${+data.wHrs.toFixed(1)}h</span>`;
+        extra = `<span class="heatmap-day-h">${+data.wHrs.toFixed(1)}h${data.night ? " 🌙" : ""}</span>`;  // ★ v1.36 Phase 3
       }
     }
     html += `<div class="${cls}"><span class="heatmap-day-num">${d2}</span>${extra}</div>`;
@@ -1723,6 +1727,7 @@ function renderAdminHeatmap(name, records) {
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.85)"></span>5 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(255,213,79,.3)"></span>วันหยุด 🌅</span>
       <span class="heatmap-legend-item"><span class="leave-pill" style="width:14px;height:14px;font-size:8px"></span>วันลา</span>
+      <span class="heatmap-legend-item">🌙 กลางคืน</span>
     </div>
   `;
 
@@ -1780,6 +1785,7 @@ function renderAdminEmpList(name, records) {
               ${isLeave
                 ? `<span class="badge badge-leave">${leaveIcon} ${r.otType}</span>`
                 : `<span class="badge ${isWday?'badge-wday':'badge-hol'}">${isWday?`${r.startTime}–${r.endTime} · ${r.hours}ชม.`:'🌅 '+r.otType}</span>
+                   ${r.nightShift ? `<span class="badge" style="background:rgba(92,107,192,.15);color:#9fa8da;font-weight:700">🌙 กลางคืน</span>` : ""}
                    ${isPaid ? `<span class="badge badge-ok" title="${r.paidAt}">✅ จ่ายแล้ว</span>` : `<span class="badge badge-pend">⏳ รอจ่าย</span>`}`}
             </div>
             ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${esc(r.task)}${r.location?" · 📍"+r.location:""}</div>`:""}
