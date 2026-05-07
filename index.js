@@ -817,6 +817,87 @@ app.delete("/api/leave/:idx", requireAdmin, async (req, res) => {
   }
 });
 
+// ── GET /api/export/leave?month=&year=&employee= — Excel ของรายการลา (★ v1.35 Phase 4) ──
+app.get("/api/export/leave", requireAdmin, async (req, res) => {
+  let { month, year, employee = "" } = req.query;
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllLeaves(sheets);
+    const d = new Date();
+    const mm = month || String(d.getMonth()+1).padStart(2,"0");
+    const yy = year  || String(d.getFullYear()+543);
+
+    const filtered = all.filter(l => {
+      if (!l.name || !l.date) return false;
+      if (employee && l.name !== employee) return false;
+      const parts = l.date.split("/");
+      return parts[1] === mm && parts[2] === yy;
+    });
+
+    if (filtered.length === 0) {
+      return res.status(404).send("ไม่มีรายการลาในเดือนนี้");
+    }
+
+    // จัดกลุ่มตามพนักงาน
+    const byEmp = {};
+    filtered.forEach(l => {
+      byEmp[l.name] = byEmp[l.name] || { name: l.name, sick: 0, biz: 0, vac: 0, total: 0 };
+      if (l.leaveType === "ลาป่วย")    byEmp[l.name].sick++;
+      if (l.leaveType === "ลากิจ")     byEmp[l.name].biz++;
+      if (l.leaveType === "ลาพักร้อน") byEmp[l.name].vac++;
+      byEmp[l.name].total++;
+    });
+    const summary = Object.values(byEmp).sort((a,b) => b.total - a.total);
+
+    const wb = XLSX.utils.book_new();
+
+    // Summary sheet
+    const sumRows = [
+      [`สรุปการลา — เดือน ${mm}/${yy}` + (employee ? ` — ${employee}` : "")],
+      [],
+      ["ลำดับ","ชื่อพนักงาน","ลาป่วย","ลากิจ","ลาพักร้อน","รวม (วัน)"],
+    ];
+    summary.forEach((e, i) => sumRows.push([i+1, e.name, e.sick, e.biz, e.vac, e.total]));
+    sumRows.push([]);
+    sumRows.push([
+      "รวมทั้งหมด", "",
+      summary.reduce((s,e)=>s+e.sick,0),
+      summary.reduce((s,e)=>s+e.biz,0),
+      summary.reduce((s,e)=>s+e.vac,0),
+      summary.reduce((s,e)=>s+e.total,0),
+    ]);
+    const ws1 = XLSX.utils.aoa_to_sheet(sumRows);
+    ws1["!cols"] = [{wch:8},{wch:20},{wch:10},{wch:10},{wch:12},{wch:10}];
+    ws1["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }];
+    styleSheet(ws1, { titleRow: 0, headerRow: 2 });
+    applyA4Print(ws1, { orientation: "portrait" });
+    XLSX.utils.book_append_sheet(wb, ws1, "สรุปการลา");
+    setPrintTitles(wb, "สรุปการลา", 2);
+
+    // Detail sheet
+    const detailRows = [
+      ["ชื่อ","วันที่","ประเภท","เหตุผล","วันที่บันทึก"],
+    ];
+    filtered.slice().sort((a,b) => a.name.localeCompare(b.name) || a.date.localeCompare(b.date)).forEach(l => {
+      detailRows.push([l.name, l.date, l.leaveType, l.reason || "", l.createdAt || ""]);
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+    ws2["!cols"] = [{wch:18},{wch:13},{wch:14},{wch:30},{wch:22}];
+    styleSheet(ws2, { headerRow: 0 });
+    applyA4Print(ws2, { orientation: "portrait" });
+    XLSX.utils.book_append_sheet(wb, ws2, "รายละเอียด");
+    setPrintTitles(wb, "รายละเอียด", 0);
+
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    const fname = (employee ? `Leave_${employee}` : "Leave_All") + `_${mm}-${yy}.xlsx`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fname)}"`);
+    res.send(buf);
+  } catch (e) {
+    res.status(500).send(`Error: ${e.message}`);
+  }
+});
+
 // ══════════════════════════════════════════════════════════════
 // ★ END LEAVE SYSTEM (Phase 1)
 // ══════════════════════════════════════════════════════════════

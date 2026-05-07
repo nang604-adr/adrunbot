@@ -1434,7 +1434,34 @@ function renderAdminOverview() {
       return { ...e, h, hol, pay, count: r2.length };
     }).filter(e => e.count > 0);
 
-    bodyHtml = `
+    // ★ v1.35 Phase 4: Leave summary card (โผล่ก่อน OT bars เมื่อมี leave)
+    const totLeave = adminLeaves.length;
+    const sickN  = adminLeaves.filter(l => l.otType === "ลาป่วย").length;
+    const bizN   = adminLeaves.filter(l => l.otType === "ลากิจ").length;
+    const vacN   = adminLeaves.filter(l => l.otType === "ลาพักร้อน").length;
+    const peopleOnLeave = new Set(adminLeaves.map(l => l.name)).size;
+    const leaveSummaryHtml = totLeave === 0 ? "" : `
+      <div class="card" style="border:1px solid rgba(239,83,80,.3);background:rgba(239,83,80,.04);margin-bottom:10px">
+        <div class="card-header" style="color:#ef9a9a">🏖️ การลา ${monthLabel} <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">${peopleOnLeave} คน · ${totLeave} วัน</span></div>
+        <div class="card-body" style="padding-top:8px">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:18px;font-weight:800;color:#ef9a9a">${sickN}</div>
+              <div style="font-size:10px;color:var(--sub)">🤒 ลาป่วย</div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:18px;font-weight:800;color:#ffb74d">${bizN}</div>
+              <div style="font-size:10px;color:var(--sub)">📋 ลากิจ</div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:18px;font-weight:800;color:#90caf9">${vacN}</div>
+              <div style="font-size:10px;color:var(--sub)">🏖️ พักร้อน</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    bodyHtml = leaveSummaryHtml + `
       <div class="card">
         <div class="card-header">📊 OT แยกตามพนักงาน <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 กดชื่อด้านบน เพื่อดูรายคน</span></div>
         ${byEmp.length ? byEmp.map(e => {
@@ -1557,12 +1584,19 @@ function renderAdminOverview() {
       <div class="kpi" style="border-color:#ffd54f"><div class="kpi-label">วันหยุด</div><div class="kpi-val" style="color:#ffd54f">${holDays}</div><div class="kpi-label">วัน</div></div>
       <div class="kpi" style="border-color:#ef6c00"><div class="kpi-label">รอแก้ไข</div><div class="kpi-val" style="color:#ffb74d">${pendingReqs}</div><div class="kpi-label">คำขอ</div></div>
     </div>
-    <div style="margin-bottom:12px;text-align:right">
+    <div style="margin-bottom:12px;text-align:right;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
       ${(() => {
         // ★ v1.34: ซ่อนปุ่ม Export Excel จาก supervisor (backend block อยู่แล้ว — กันคลิกแล้ว 403)
         if (STATE.role !== "admin") return "";
         const exportUrl = withUidQS(`/api/export/monthly?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
-        return `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 ดาวน์โหลด Excel');}">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</a>`;
+        const leaveUrl  = withUidQS(`/api/export/leave?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
+        const otBtn = `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 OT Excel');}">📥 OT ${sel?'('+sel+')':''}</a>`;
+        // ★ v1.35 Phase 4: ปุ่ม Export Leave (โผล่เฉพาะถ้ามี leave ในเดือนนั้น)
+        const hasLeaveInMonth = (sel ? adminLeaves.filter(l => l.name === sel) : adminLeaves).length > 0;
+        const leaveBtn = hasLeaveInMonth
+          ? `<a href="${leaveUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;border-color:rgba(239,83,80,.4);color:#ef9a9a" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${leaveUrl}','📥 Leave Excel');}">🏖️ Leave</a>`
+          : "";
+        return otBtn + leaveBtn;
       })()}
     </div>
     ${bodyHtml}
