@@ -1404,6 +1404,13 @@ function renderAdminOverview() {
   const holPay       = recs.filter(r=>r.otType!=="วันธรรมดา").reduce((s,r)=>s+(r.pay||0), 0);
   const totalPay     = wPay + holPay;
 
+  // ★ v1.34: month label (ย้ายมาไว้ก่อน เพราะ leaveSummaryHtml ใน else branch อ้างถึง — fix Phase 4 bug)
+  const adminM = Number(STATE.adminMonth);
+  const adminY = Number(STATE.adminYear);
+  const monthLabel = `${MONTHS_SHORT[adminM-1]} ${adminY}`;
+  const dNow = new Date();
+  const isCurrentMonth = adminM === (dNow.getMonth()+1) && adminY === (dNow.getFullYear()+543);
+
   let bodyHtml = "";
   if (sel) {
     // Specific employee → heatmap + list
@@ -1491,11 +1498,7 @@ function renderAdminOverview() {
   }
 
   // ★ v1.34: month nav (back/forward) + แสดงยอดค้างเดือนเก่า
-  const adminM = Number(STATE.adminMonth);
-  const adminY = Number(STATE.adminYear);
-  const monthLabel = `${MONTHS_SHORT[adminM-1]} ${adminY}`;
-  const dNow = new Date();
-  const isCurrentMonth = adminM === (dNow.getMonth()+1) && adminY === (dNow.getFullYear()+543);
+  // (adminM, adminY, monthLabel, dNow, isCurrentMonth — ย้ายไปประกาศข้างบนแล้ว)
 
   // กรอง carry ตามพนักงานที่เลือก
   const carryFiltered = sel ? adminCarry.filter(r => r.name === sel) : adminCarry;
