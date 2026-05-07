@@ -584,6 +584,8 @@ async function init() {
       badge.style.background = "rgba(92,107,192,.2)";
       badge.style.color = "#9fa8da";
       document.getElementById("tab-admin").style.display      = "block";
+      // ★ v1.34: เปลี่ยนชื่อ tab เป็น "หัวหน้า" สำหรับ supervisor
+      document.getElementById("tab-admin").textContent        = "🔐 หัวหน้า";
       document.getElementById("tab-supervisor").style.display = "block";
       // ตั้งค่า ไม่เห็น
       refreshSupervisorBadge().catch(() => {});  // โหลด badge ตัวเลข
@@ -1275,6 +1277,12 @@ function renderAdminOverview() {
   const holDays    = recs.filter(r=>r.otType!=="วันธรรมดา").length;
   const pendingReqs = adminRequests.filter(r => r.status==="รอดำเนินการ" && (!sel || r.name===sel)).length;
 
+  // ★ v1.34: ยอดเงิน — admin only
+  const isMoneyAdmin = STATE.role === "admin";
+  const wPay         = recs.filter(r=>r.otType==="วันธรรมดา").reduce((s,r)=>s+(r.pay||0), 0);
+  const holPay       = recs.filter(r=>r.otType!=="วันธรรมดา").reduce((s,r)=>s+(r.pay||0), 0);
+  const totalPay     = wPay + holPay;
+
   let bodyHtml = "";
   if (sel) {
     // Specific employee → heatmap + list
@@ -1284,7 +1292,10 @@ function renderAdminOverview() {
         <div class="card-body" id="adminHeatmap"></div>
       </div>
       <div class="card">
-        <div class="card-header">📋 รายการละเอียด — ${sel}</div>
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>📋 รายการละเอียด — ${esc(sel)}</span>
+          ${isMoneyAdmin ? `<span style="font-size:11px;color:#81c784;font-weight:700">รวม ${totalPay.toLocaleString()} ฿</span>` : ""}
+        </div>
         <div id="adminEmpList"></div>
       </div>
     `;
@@ -1403,6 +1414,22 @@ function renderAdminOverview() {
     ${carryCardHtml}
 
     <div class="month-row" style="margin-bottom:12px">${empChips}</div>
+
+    ${isMoneyAdmin ? `
+      <div style="background:linear-gradient(135deg,rgba(0,185,0,.12),rgba(255,213,79,.08));border:1px solid rgba(0,185,0,.3);border-radius:12px;padding:12px 14px;margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <div>
+            <div style="font-size:10px;color:var(--sub);margin-bottom:2px">💰 ยอด OT รวม ${monthLabel}${sel?` · ${esc(sel)}`:""}</div>
+            <div style="font-size:20px;font-weight:800;color:#ffd54f">${totalPay.toLocaleString()} ฿</div>
+          </div>
+          <div style="text-align:right;font-size:10px;color:var(--sub);line-height:1.7">
+            <div>วันธรรมดา: <b style="color:#81c784">${wPay.toLocaleString()}฿</b></div>
+            <div>วันหยุด/ตจว.: <b style="color:#ffd54f">${holPay.toLocaleString()}฿</b></div>
+          </div>
+        </div>
+      </div>
+    ` : ""}
+
     <div class="kpi-grid kpi-grid-4">
       <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">วัน OT</div><div class="kpi-val" style="color:#9fa8da">${days}</div><div class="kpi-label">วัน</div></div>
       <div class="kpi" style="border-color:#00b900"><div class="kpi-label">ชั่วโมง</div><div class="kpi-val" style="color:#81c784">${+wHrs.toFixed(1)}</div><div class="kpi-label">ชม.</div></div>
@@ -1509,6 +1536,10 @@ function renderAdminEmpList(name, records) {
           ? `<button class="btn btn-grey btn-sm" disabled title="จ่ายแล้ว ลบไม่ได้ — undo รอบก่อน" style="opacity:.4;cursor:not-allowed;padding:5px 8px">🔒</button>`
           : `<button class="btn btn-grey btn-sm" onclick="adminDeleteRecord(${r.idx},'${empName}','${r.date}','${desc}',${r.pay||0})" title="ลบ record นี้ (ฉุกเฉิน)" style="padding:5px 8px;color:#ef9a9a">🗑️</button>`)
       : "";
+    // ★ v1.34: แสดงยอดเงินสำหรับ admin (supervisor ไม่เห็น)
+    const payHtml = isAdmin && (r.pay||0) > 0
+      ? `<div style="font-size:12px;color:#81c784;font-weight:700;margin-top:2px">💰 ${(r.pay||0).toLocaleString()} ฿</div>`
+      : "";
     return `
       <div class="ot-row" style="${rowBg}">
         <div style="display:flex;align-items:flex-start;gap:10px">
@@ -1523,6 +1554,7 @@ function renderAdminEmpList(name, records) {
               ${isPaid ? `<span class="badge badge-ok" title="${r.paidAt}">✅ จ่ายแล้ว</span>` : `<span class="badge badge-pend">⏳ รอจ่าย</span>`}
             </div>
             ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${esc(r.task)}${r.location?" · 📍"+r.location:""}</div>`:""}
+            ${payHtml}
           </div>
           ${deleteBtn}
         </div>
@@ -1630,10 +1662,20 @@ function renderChartDaily() {
       </div>`;
   }).join("");
 
+  // ★ v1.34: ยอดเงินสำหรับ admin
+  const isMoneyAdmin = STATE.role === "admin";
+  const totalPay = recs.reduce((s,r) => s+(r.pay||0), 0);
+  const moneyHeader = isMoneyAdmin && totalPay > 0
+    ? `<span style="font-size:11px;color:#81c784;font-weight:700;margin-left:auto">💰 ${totalPay.toLocaleString()} ฿</span>`
+    : "";
+
   return `
     ${chips}
     <div class="card">
-      <div class="card-header">📈 OT รายวัน — ${sel || "ทั้งหมด"} (เดือนนี้)</div>
+      <div class="card-header" style="display:flex;align-items:center">
+        <span>📈 OT รายวัน — ${sel || "ทั้งหมด"} (เดือนนี้)</span>
+        ${moneyHeader}
+      </div>
       <div class="card-body">
         ${dates.length
           ? `<div class="chart-wrap"><div class="chart-inner">${bars}</div></div>`
@@ -1644,6 +1686,7 @@ function renderChartDaily() {
 
 // ── Mode 2: Ranking ────────────────────────────────────────
 function renderChartRanking() {
+  const isMoneyAdmin = STATE.role === "admin";
   const sort = STATE.chartSort || "days";
 
   const stats = adminEmployees.map(e => {
@@ -1651,18 +1694,22 @@ function renderChartRanking() {
     const days = new Set(r2.map(r => r.date)).size;
     const hours = r2.filter(r => r.otType==="วันธรรมดา").reduce((s,r)=>s+r.hours, 0);
     const holidays = r2.filter(r => r.otType !== "วันธรรมดา").length;
-    return { name: e.name, days, hours: +hours.toFixed(1), holidays, count: r2.length };
+    const pay = r2.reduce((s,r) => s+(r.pay||0), 0);
+    return { name: e.name, days, hours: +hours.toFixed(1), holidays, pay, count: r2.length };
   }).filter(e => e.count > 0);
 
   // Sort
   if (sort === "days")     stats.sort((a,b) => b.days - a.days);
   if (sort === "hours")    stats.sort((a,b) => b.hours - a.hours);
   if (sort === "holidays") stats.sort((a,b) => b.holidays - a.holidays);
+  if (sort === "pay")      stats.sort((a,b) => b.pay - a.pay);
 
+  // ★ v1.34: เพิ่ม sort "ยอดเงิน" เฉพาะ admin
   const sortOptions = [
     { id: "days",     label: "📅 จำนวนวัน OT" },
     { id: "hours",    label: "⏰ ชั่วโมงรวม" },
     { id: "holidays", label: "🌅 วันหยุด" },
+    ...(isMoneyAdmin ? [{ id: "pay", label: "💰 ยอดเงิน" }] : []),
   ];
   const sortBar = `
     <div style="font-size:10px;color:var(--sub);margin-bottom:6px">เรียงตาม:</div>
@@ -1678,17 +1725,19 @@ function renderChartRanking() {
     return sortBar + `<div class="card"><div style="padding:30px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีข้อมูล OT เดือนนี้</div></div>`;
   }
 
-  const sortKey = sort === "days" ? "days" : sort === "hours" ? "hours" : "holidays";
+  const sortKey = ["days","hours","holidays","pay"].includes(sort) ? sort : "days";
   const maxVal  = Math.max(1, ...stats.map(s => s[sortKey]));
 
-  const d = new Date();
-  const monthLabel = MONTHS_SHORT[d.getMonth()];
-  const yearLabel  = d.getFullYear() + 543;
+  // ★ v1.34: ใช้ STATE.adminMonth/Year (สำหรับเดือนที่ navigate)
+  const monthLabel = MONTHS_SHORT[Number(STATE.adminMonth)-1] || "";
+  const yearLabel  = STATE.adminYear || (new Date().getFullYear()+543);
   const sortLabel  = sortOptions.find(o => o.id === sort).label;
 
   const ranks = stats.map((e, i) => {
     const val = e[sortKey];
-    const sub = `${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays} ครั้ง`;
+    const sub = isMoneyAdmin
+      ? `${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays} · 💰 ${e.pay.toLocaleString()}฿`
+      : `${e.days} วัน · ${e.hours} ชม. · วันหยุด ${e.holidays} ครั้ง`;
     const pct = (val / maxVal) * 100;
     const empColor = EMP_COLORS[e.name.charCodeAt(0) % EMP_COLORS.length];
 
@@ -1707,7 +1756,7 @@ function renderChartRanking() {
             <div style="font-size:13px;font-weight:700">${esc(e.name)}</div>
             <div style="font-size:10px;color:var(--sub)">${sub}</div>
           </div>
-          <div style="font-size:${i<3?'18px':'16px'};font-weight:800;color:${numColor}">${val}</div>
+          <div style="font-size:${i<3?'18px':'16px'};font-weight:800;color:${numColor}">${sortKey==="pay" ? val.toLocaleString()+"฿" : val}</div>
         </div>
         <div style="height:${i<3?'6px':'5px'};background:rgba(255,255,255,.05);border-radius:3px">
           <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width .3s"></div>
@@ -1783,9 +1832,13 @@ function renderChartCompare() {
     `;
   }).join("");
 
+  // ★ v1.34: เพิ่มยอดเงินใน legend (admin only)
+  const isMoneyAdmin = STATE.role === "admin";
   const legend = compare.map(name => {
     const empColor = EMP_COLORS[name.charCodeAt(0) % EMP_COLORS.length];
-    return `<span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text)"><span style="width:10px;height:10px;border-radius:2px;background:${empColor}"></span>${name}</span>`;
+    const empPay = adminRecords.filter(r => r.name === name).reduce((s,r) => s+(r.pay||0), 0);
+    const moneyTxt = isMoneyAdmin && empPay > 0 ? ` <b style="color:#81c784">${empPay.toLocaleString()}฿</b>` : "";
+    return `<span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text)"><span style="width:10px;height:10px;border-radius:2px;background:${empColor}"></span>${esc(name)}${moneyTxt}</span>`;
   }).join("");
 
   return `
