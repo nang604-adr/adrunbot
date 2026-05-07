@@ -1411,6 +1411,8 @@ function renderAdminOverview() {
     </div>
     <div style="margin-bottom:12px;text-align:right">
       ${(() => {
+        // ★ v1.34: ซ่อนปุ่ม Export Excel จาก supervisor (backend block อยู่แล้ว — กันคลิกแล้ว 403)
+        if (STATE.role !== "admin") return "";
         const exportUrl = withUidQS(`/api/export/monthly?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
         return `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 ดาวน์โหลด Excel');}">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</a>`;
       })()}
