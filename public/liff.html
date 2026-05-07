@@ -273,7 +273,7 @@ textarea{resize:none;height:70px}
 
   <!-- Tab bar -->
   <div id="tabbar">
-    <button class="tab active" onclick="showTab('record')" id="tab-record">📋 บันทึก OT</button>
+    <button class="tab active" onclick="showTab('record')" id="tab-record">📋 บันทึก OT/ลา</button>
     <button class="tab" onclick="showTab('myot')" id="tab-myot">📊 OT ของฉัน</button>
     <button class="tab" onclick="showTab('admin')" id="tab-admin" style="display:none">🔐 Admin</button>
     <button class="tab" onclick="showTab('settings')" id="tab-settings" style="display:none">⚙️ ตั้งค่า</button>
@@ -285,6 +285,15 @@ textarea{resize:none;height:70px}
 
     <!-- ══════════════════ RECORD TAB ══════════════════ -->
     <div class="section show" id="sec-record">
+
+      <!-- ★ v1.35 Phase 2: Mode toggle — OT / ลางาน -->
+      <div style="display:flex;background:#141829;border-radius:10px;padding:3px;margin-bottom:12px;border:1px solid var(--border)">
+        <button id="modeBtnOt"    onclick="setRecordMode('ot')"    style="flex:1;padding:10px 6px;border:0;border-radius:8px;background:linear-gradient(135deg,var(--green),var(--green2));color:#fff;font-size:13px;font-weight:700;font-family:'Noto Sans Thai',sans-serif;cursor:pointer">🟢 ลง OT</button>
+        <button id="modeBtnLeave" onclick="setRecordMode('leave')" style="flex:1;padding:10px 6px;border:0;border-radius:8px;background:transparent;color:var(--sub);font-size:13px;font-weight:700;font-family:'Noto Sans Thai',sans-serif;cursor:pointer">🏖️ ลางาน</button>
+      </div>
+
+      <!-- ─────── OT MODE (ของเดิมทั้งหมด ห่อใน modeOt) ─────── -->
+      <div id="modeOt">
 
       <!-- Date picker -->
       <div class="card">
@@ -379,6 +388,64 @@ textarea{resize:none;height:70px}
 
       <div class="err-box" id="recordErr"></div>
       <button class="btn btn-green" onclick="submitOT()">✅ บันทึก OT</button>
+
+      </div>
+      <!-- ─────── /OT MODE ─────── -->
+
+      <!-- ─────── LEAVE MODE (★ v1.35 Phase 2) ─────── -->
+      <div id="modeLeave" style="display:none">
+
+        <!-- Leave date picker -->
+        <div class="card">
+          <div class="card-header">📅 วันที่ลา <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 ลาย้อนหลังไม่ได้</span></div>
+          <div class="card-body" style="padding-bottom:8px">
+            <button class="date-btn" onclick="toggleLeaveCal()">
+              <div class="date-val">
+                <span>📅</span>
+                <span id="leaveDateDisplay" style="font-size:14px;font-weight:700">--/--/----</span>
+                <span class="day-badge day-wday" id="leaveDowDisplay">-</span>
+              </div>
+              <span style="color:var(--sub);font-size:12px" id="leaveCalArrow">▼</span>
+            </button>
+            <div id="leaveCalWrap" style="display:none;margin-top:8px">
+              <div class="cal-wrap">
+                <div class="cal-nav">
+                  <button class="cal-nav-btn" onclick="leaveCalPrev()">‹</button>
+                  <div class="cal-title" id="leaveCalTitle">--</div>
+                  <button class="cal-nav-btn" onclick="leaveCalNext()">›</button>
+                </div>
+                <div class="cal-grid" id="leaveCalGrid"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Leave type buttons -->
+        <div class="card">
+          <div class="card-header">🏷️ ประเภทการลา</div>
+          <div class="card-body">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+              <button id="leaveType_sick" class="day-type-btn" onclick="setLeaveType('ลาป่วย')">🤒 ลาป่วย</button>
+              <button id="leaveType_biz"  class="day-type-btn" onclick="setLeaveType('ลากิจ')">📋 ลากิจ</button>
+              <button id="leaveType_vac"  class="day-type-btn" onclick="setLeaveType('ลาพักร้อน')">🏖️ พักร้อน</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reason -->
+        <div class="card">
+          <div class="card-body" style="padding-bottom:14px">
+            <label>📝 เหตุผลการลา *</label>
+            <textarea id="leaveReason" placeholder="เช่น เป็นไข้, ปวดท้อง, ติดต่อราชการ..." style="min-height:60px"></textarea>
+          </div>
+        </div>
+
+        <div class="err-box" id="leaveErr"></div>
+        <button class="btn btn-green" onclick="submitLeave()">✅ บันทึกการลา</button>
+
+      </div>
+      <!-- ─────── /LEAVE MODE ─────── -->
+
     </div>
 
     <!-- ══════════════════ MY OT TAB (v1.10) ══════════════════ -->
@@ -498,6 +565,11 @@ let STATE = {
   payShowAll: false,
   payYearFilter: "all",
   reqShowAll: false,
+  // ★ v1.35 Phase 2: Leave mode
+  recordMode: "ot",          // "ot" | "leave"
+  leaveDate: "", leaveDow: 0,
+  leaveType: "",             // "ลาป่วย" | "ลากิจ" | "ลาพักร้อน"
+  leaveCalYear: 0, leaveCalMonth: 0,
 };
 
 const MONTHS_TH   = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
@@ -2602,6 +2674,141 @@ async function applyCleanup() {
     toast("เชื่อมต่อไม่ได้", "err");
   }
 }
+
+// ════════════ ★ v1.35 Phase 2: LEAVE FORM ════════════
+function setRecordMode(mode) {
+  STATE.recordMode = mode;
+  const isOt = mode === "ot";
+  document.getElementById("modeOt").style.display    = isOt ? "block" : "none";
+  document.getElementById("modeLeave").style.display = isOt ? "none"  : "block";
+  const btnOt = document.getElementById("modeBtnOt");
+  const btnLv = document.getElementById("modeBtnLeave");
+  if (isOt) {
+    btnOt.style.background = "linear-gradient(135deg,var(--green),var(--green2))";
+    btnOt.style.color = "#fff";
+    btnLv.style.background = "transparent";
+    btnLv.style.color = "var(--sub)";
+  } else {
+    btnLv.style.background = "linear-gradient(135deg,#ef5350,#e57373)";
+    btnLv.style.color = "#fff";
+    btnOt.style.background = "transparent";
+    btnOt.style.color = "var(--sub)";
+    // init leave date = วันนี้ (ครั้งแรกที่เข้า)
+    if (!STATE.leaveDate) {
+      const t = todayThai();
+      const [d, m, y] = t.split("/").map(Number);
+      const dow = new Date(y - 543, m - 1, d).getDay();
+      STATE.leaveDate = t;
+      STATE.leaveDow = dow;
+      STATE.leaveCalYear  = y - 543;
+      STATE.leaveCalMonth = m - 1;
+      updateLeaveDateDisplay();
+    }
+  }
+}
+
+function setLeaveType(t) {
+  STATE.leaveType = t;
+  ["sick","biz","vac"].forEach(k => document.getElementById("leaveType_"+k).classList.remove("active"));
+  if (t === "ลาป่วย")    document.getElementById("leaveType_sick").classList.add("active");
+  if (t === "ลากิจ")     document.getElementById("leaveType_biz").classList.add("active");
+  if (t === "ลาพักร้อน") document.getElementById("leaveType_vac").classList.add("active");
+}
+
+function toggleLeaveCal() {
+  const w = document.getElementById("leaveCalWrap");
+  const a = document.getElementById("leaveCalArrow");
+  const open = w.style.display !== "none";
+  w.style.display = open ? "none" : "block";
+  a.textContent = open ? "▼" : "▲";
+  if (!open) renderLeaveCal();
+}
+
+function leaveCalPrev() {
+  if (--STATE.leaveCalMonth < 0) { STATE.leaveCalMonth = 11; STATE.leaveCalYear--; }
+  renderLeaveCal();
+}
+function leaveCalNext() {
+  if (++STATE.leaveCalMonth > 11) { STATE.leaveCalMonth = 0; STATE.leaveCalYear++; }
+  renderLeaveCal();
+}
+
+function renderLeaveCal() {
+  const y = STATE.leaveCalYear, m = STATE.leaveCalMonth;
+  document.getElementById("leaveCalTitle").textContent = `${MONTHS_SHORT[m]} ${y+543}`;
+  const grid = document.getElementById("leaveCalGrid");
+  const firstDow = new Date(y, m, 1).getDay();
+  const days = new Date(y, m+1, 0).getDate();
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  let html = DAYS_TH.map((d,i)=>`<div class="cal-hdr ${i===0?'sun':i===6?'sat':''}">${d}</div>`).join("");
+  for (let i=0;i<firstDow;i++) html += `<div></div>`;
+  for (let d=1;d<=days;d++) {
+    const dt = new Date(y, m, d); dt.setHours(0,0,0,0);
+    const isPast = dt.getTime() < today.getTime();
+    const dd = String(d).padStart(2,"0");
+    const mm2 = String(m+1).padStart(2,"0");
+    const dateStr = `${dd}/${mm2}/${y+543}`;
+    const isSel = dateStr === STATE.leaveDate;
+    const dow = dt.getDay();
+    let cls = "cal-day";
+    if (isSel)   cls += " selected";
+    if (dow===0) cls += " sun-day";
+    if (dow===6) cls += " sat-day";
+    if (isPast)  cls += " future"; // reuse opacity:.35 + cursor:not-allowed
+    const onclick = isPast ? "" : `onclick="pickLeaveDate('${dateStr}',${dow})"`;
+    html += `<div class="${cls}" ${onclick}><span class="cal-day-num">${d}</span></div>`;
+  }
+  grid.innerHTML = html;
+}
+
+function pickLeaveDate(dateStr, dow) {
+  STATE.leaveDate = dateStr;
+  STATE.leaveDow  = dow;
+  updateLeaveDateDisplay();
+  toggleLeaveCal();
+}
+
+function updateLeaveDateDisplay() {
+  if (!STATE.leaveDate) return;
+  document.getElementById("leaveDateDisplay").textContent = STATE.leaveDate;
+  const badge = document.getElementById("leaveDowDisplay");
+  badge.textContent = "วัน" + DAYS_FULL[STATE.leaveDow];
+  badge.className = "day-badge " + (STATE.leaveDow===0?"day-sun":STATE.leaveDow===6?"day-sat":"day-wday");
+}
+
+async function submitLeave() {
+  const errBox = document.getElementById("leaveErr");
+  errBox.style.display = "none";
+
+  if (!STATE.empData?.name) return showErr(errBox, "ไม่พบข้อมูลพนักงาน");
+  if (!STATE.leaveDate)     return showErr(errBox, "กรุณาเลือกวันที่ลา");
+  if (!STATE.leaveType)     return showErr(errBox, "กรุณาเลือกประเภทการลา");
+  const reason = (document.getElementById("leaveReason").value || "").trim();
+  if (!reason) return showErr(errBox, "กรุณาระบุเหตุผลการลา");
+
+  try {
+    const res = await apiFetch("/api/leave", {
+      method: "POST",
+      body: JSON.stringify({
+        name: STATE.empData.name,
+        date: STATE.leaveDate,
+        leaveType: STATE.leaveType,
+        reason,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) return showErr(errBox, data.error || "บันทึกไม่สำเร็จ");
+    toast(`✅ บันทึก ${STATE.leaveType}\n📅 ${STATE.leaveDate}`, "ok");
+    // reset form
+    STATE.leaveType = "";
+    ["sick","biz","vac"].forEach(k => document.getElementById("leaveType_"+k).classList.remove("active"));
+    document.getElementById("leaveReason").value = "";
+  } catch (e) {
+    showErr(errBox, "เชื่อมต่อไม่ได้");
+  }
+}
+// ════════════ /LEAVE FORM ════════════
 
 // ── Excel Export Helpers ─────────────────────────────────
 // ★ v1.16: เช็คว่าอยู่ใน LIFF mobile inApp browser ที่ block download
