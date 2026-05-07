@@ -186,6 +186,8 @@ textarea{resize:none;height:70px}
 /* ★ v1.35: leave day = full red highlight (สังเกตง่าย) */
 .heatmap-day.leave-d{background:rgba(239,83,80,.7);color:#fff;font-weight:700}
 .badge-leave{background:rgba(239,83,80,.18);color:#ef9a9a;font-weight:700}
+/* ★ v1.35.1: วงกลมคำว่า "ลา" — ขาว+แดงตัดกันชัด */
+.leave-pill{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;background:#fff;color:#c62828;border-radius:50%;font-size:10px;font-weight:900;font-family:'Noto Sans Thai',sans-serif;line-height:1}
 .heatmap-day-num{line-height:1}
 .heatmap-day-h{font-size:8px;opacity:.95;line-height:1}
 .heatmap-legend{display:flex;gap:10px;margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-size:9px;color:var(--sub);justify-content:center;flex-wrap:wrap;align-items:center}
@@ -1223,8 +1225,7 @@ function renderMyOTHeatmap(records) {
     if (data) {
       if (data.leave) {  // ★ v1.35: leave สำคัญสุด (full red)
         cls += " leave-d";
-        const icon = data.leave === "ลาป่วย" ? "🤒" : data.leave === "ลากิจ" ? "📋" : "🏖️";
-        extra = `<span class="heatmap-day-h">${icon}</span>`;
+        extra = `<span class="leave-pill">ลา</span>`;  // ★ v1.35.1: วงกลม "ลา"
       } else if (data.hol) {
         cls += " holiday-d";
         extra = `<span class="heatmap-day-h">🌅</span>`;
@@ -1245,7 +1246,7 @@ function renderMyOTHeatmap(records) {
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.55)"></span>3–4 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.85)"></span>5 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(255,213,79,.3)"></span>วันหยุด 🌅</span>
-      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(239,83,80,.7)"></span>ลางาน 🏖️</span>
+      <span class="heatmap-legend-item"><span class="leave-pill" style="width:14px;height:14px;font-size:8px"></span>วันลา</span>
     </div>
   `;
 
@@ -1593,11 +1594,11 @@ function renderAdminOverview() {
         if (STATE.role !== "admin") return "";
         const exportUrl = withUidQS(`/api/export/monthly?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
         const leaveUrl  = withUidQS(`/api/export/leave?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
-        const otBtn = `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 OT Excel');}">📥 OT ${sel?'('+sel+')':''}</a>`;
-        // ★ v1.35 Phase 4: ปุ่ม Export Leave (โผล่เฉพาะถ้ามี leave ในเดือนนั้น)
+        const otBtn = `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 Excel OT');}">📥 Excel OT ${sel?'('+sel+')':''}</a>`;
+        // ★ v1.35.1: ปุ่ม Excel ลา (โผล่เฉพาะถ้ามี leave ในเดือนนั้น)
         const hasLeaveInMonth = (sel ? adminLeaves.filter(l => l.name === sel) : adminLeaves).length > 0;
         const leaveBtn = hasLeaveInMonth
-          ? `<a href="${leaveUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;border-color:rgba(239,83,80,.4);color:#ef9a9a" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${leaveUrl}','📥 Leave Excel');}">🏖️ Leave</a>`
+          ? `<a href="${leaveUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block;border-color:rgba(239,83,80,.4);color:#ef9a9a" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${leaveUrl}','📥 Excel ลา');}">📥 Excel ลา</a>`
           : "";
         return otBtn + leaveBtn;
       })()}
@@ -1645,8 +1646,7 @@ function renderAdminHeatmap(name, records) {
     if (data) {
       if (data.leave) {  // ★ v1.35: leave priority
         cls += " leave-d";
-        const icon = data.leave === "ลาป่วย" ? "🤒" : data.leave === "ลากิจ" ? "📋" : "🏖️";
-        extra = `<span class="heatmap-day-h">${icon}</span>`;
+        extra = `<span class="leave-pill">ลา</span>`;  // ★ v1.35.1: วงกลม "ลา"
       } else if (data.hol) {
         cls += " holiday-d";
         extra = `<span class="heatmap-day-h">🌅</span>`;
@@ -1666,7 +1666,7 @@ function renderAdminHeatmap(name, records) {
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.55)"></span>3–4 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(0,185,0,.85)"></span>5 ชม.</span>
       <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(255,213,79,.3)"></span>วันหยุด 🌅</span>
-      <span class="heatmap-legend-item"><span class="heatmap-legend-sw" style="background:rgba(239,83,80,.7)"></span>ลางาน 🏖️</span>
+      <span class="heatmap-legend-item"><span class="leave-pill" style="width:14px;height:14px;font-size:8px"></span>วันลา</span>
     </div>
   `;
 
