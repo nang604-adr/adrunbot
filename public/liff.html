@@ -487,6 +487,8 @@ let STATE = {
   adminSub: "overview", settingsSub: "employees",
   holidayYear: "",
   adminEmpView: "",
+  adminMonth: "", adminYear: "",  // ★ v1.34: เดือน/ปีที่กำลังดูในหน้า Admin
+  adminCarryShow: false,           // ★ v1.34: toggle รายละเอียดยอดค้างจากเดือนก่อน
   chartMode: "daily",
   chartEmpFilter: "",
   chartSort: "days",
@@ -1167,12 +1169,17 @@ async function submitEditRequest(idx, date, desc) {
 // ══════════════════════════════════════════════════════════════
 // ADMIN
 // ══════════════════════════════════════════════════════════════
-let adminRecords = [], adminEmployees = [], adminRequests = [];
+let adminRecords = [], adminEmployees = [], adminRequests = [], adminCarry = [];
 
 async function loadAdmin() {
-  const d  = new Date();
-  const mm = String(d.getMonth()+1).padStart(2,"0");
-  const yy = String(d.getFullYear()+543);
+  // ★ v1.34: ใช้ STATE.adminMonth/Year ถ้ามี (เพื่อ navigate ย้อนหลังได้); default = เดือนปัจจุบัน
+  if (!STATE.adminMonth || !STATE.adminYear) {
+    const d = new Date();
+    STATE.adminMonth = String(d.getMonth()+1).padStart(2,"0");
+    STATE.adminYear  = String(d.getFullYear()+543);
+  }
+  const mm = STATE.adminMonth;
+  const yy = STATE.adminYear;
 
   // ★ v1.32: supervisor (ไม่ใช่ admin) — ไม่เรียก /api/edit-requests (admin-only) + ซ่อน sub-tabs
   const isAdminUser = STATE.role === "admin";
@@ -1196,10 +1203,37 @@ async function loadAdmin() {
   const reqData = isAdminUser ? await results[2].json() : { requests: [] };
 
   adminRecords   = recData.records || [];
+  adminCarry     = recData.pendingCarry || [];   // ★ v1.34
   adminEmployees = empData.employees || [];
   adminRequests  = reqData.requests || [];
 
   showAdminSub(STATE.adminSub);
+}
+
+// ★ v1.34: นำทางเดือน Admin (back/forward)
+function adminMonthNav(delta) {
+  let m = Number(STATE.adminMonth);
+  let y = Number(STATE.adminYear) - 543;  // → ค.ศ.
+  m += delta;
+  if (m < 1)   { m = 12; y -= 1; }
+  if (m > 12)  { m = 1;  y += 1; }
+  STATE.adminMonth = String(m).padStart(2,"0");
+  STATE.adminYear  = String(y + 543);
+  STATE.adminCarryShow = false;
+  loadAdmin();
+}
+
+function adminMonthThis() {
+  const d = new Date();
+  STATE.adminMonth = String(d.getMonth()+1).padStart(2,"0");
+  STATE.adminYear  = String(d.getFullYear()+543);
+  STATE.adminCarryShow = false;
+  loadAdmin();
+}
+
+function toggleAdminCarry() {
+  STATE.adminCarryShow = !STATE.adminCarryShow;
+  renderAdminOverview();
 }
 
 function showAdminSub(sub) {
@@ -1297,7 +1331,77 @@ function renderAdminOverview() {
     `;
   }
 
+  // ★ v1.34: month nav (back/forward) + แสดงยอดค้างเดือนเก่า
+  const adminM = Number(STATE.adminMonth);
+  const adminY = Number(STATE.adminYear);
+  const monthLabel = `${MONTHS_SHORT[adminM-1]} ${adminY}`;
+  const dNow = new Date();
+  const isCurrentMonth = adminM === (dNow.getMonth()+1) && adminY === (dNow.getFullYear()+543);
+
+  // กรอง carry ตามพนักงานที่เลือก
+  const carryFiltered = sel ? adminCarry.filter(r => r.name === sel) : adminCarry;
+  const carryTotal    = carryFiltered.reduce((s,r) => s + (r.pay||0), 0);
+  const carryHours    = carryFiltered.filter(r => r.otType==="วันธรรมดา").reduce((s,r) => s+(r.hours||0), 0);
+  const carryHolidays = carryFiltered.filter(r => r.otType!=="วันธรรมดา").length;
+  const showMoneyCarry = STATE.role === "admin";
+
+  // จัดกลุ่ม carry ตามเดือน (เผื่อมีหลายเดือนค้างซ้อน)
+  const carryByMonth = {};
+  carryFiltered.forEach(r => {
+    const [, mm2, yy2] = r.date.split("/");
+    const k = `${mm2}/${yy2}`;
+    carryByMonth[k] = carryByMonth[k] || { mm: mm2, yy: yy2, items: [], pay: 0 };
+    carryByMonth[k].items.push(r);
+    carryByMonth[k].pay += (r.pay || 0);
+  });
+  const carryMonths = Object.values(carryByMonth).sort((a,b) => {
+    return new Date(+a.yy-543, +a.mm-1, 1) - new Date(+b.yy-543, +b.mm-1, 1);
+  });
+
+  const carryCardHtml = carryFiltered.length === 0 ? "" : `
+    <div class="card" style="margin-bottom:12px;border:1px solid rgba(255,167,38,.4);background:rgba(255,167,38,.04)">
+      <div onclick="toggleAdminCarry()" style="cursor:pointer;padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:700;color:#ffb74d;margin-bottom:2px">⏭️ ค้างจ่ายจากเดือนเก่า ${sel?'· '+esc(sel):''}</div>
+          <div style="font-size:10px;color:var(--sub)">
+            ${carryFiltered.length} รายการ · ${+carryHours.toFixed(1)} ชม. · วันหยุด/ตจว. ${carryHolidays}
+            ${carryMonths.length > 1 ? ` · ${carryMonths.length} เดือน` : ""}
+          </div>
+        </div>
+        ${showMoneyCarry ? `<div style="font-size:14px;font-weight:800;color:#ffb74d;text-align:right">${carryTotal.toLocaleString()} ฿</div>` : ""}
+        <div style="color:var(--sub);font-size:14px">${STATE.adminCarryShow ? "▲" : "▼"}</div>
+      </div>
+      ${STATE.adminCarryShow ? `
+        <div style="border-top:1px solid var(--border);padding:10px 14px;max-height:280px;overflow-y:auto">
+          ${carryMonths.map(g => `
+            <div style="margin-bottom:10px">
+              <div style="font-size:11px;font-weight:700;color:#ffb74d;margin-bottom:5px">📅 ${MONTHS_SHORT[+g.mm-1]} ${g.yy} · ${g.items.length} รายการ${showMoneyCarry?` · ${g.pay.toLocaleString()} ฿`:""}</div>
+              ${g.items.map(r => {
+                const isW = r.otType==="วันธรรมดา";
+                const desc = isW ? `${r.startTime}–${r.endTime} · ${r.hours}ชม.` : `🌅 ${r.otType}`;
+                const taskTxt = r.task && r.task!=="-" ? ` · ${esc(r.task)}` : "";
+                return `<div style="font-size:11px;color:var(--sub);padding:3px 0;display:flex;justify-content:space-between;gap:8px">
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${!sel?`<b style="color:#e8eaf6">${esc(r.name)}</b> · `:""}${r.date} ${desc}${taskTxt}</span>
+                  ${showMoneyCarry?`<span style="color:#ffb74d;font-weight:600;flex-shrink:0">${(r.pay||0).toLocaleString()}฿</span>`:""}
+                </div>`;
+              }).join("")}
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+
   document.getElementById("admin-overview").innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;background:#141829;padding:8px;border-radius:10px;border:1px solid var(--border)">
+      <button class="btn btn-grey btn-sm" onclick="adminMonthNav(-1)" style="padding:5px 10px" title="เดือนก่อนหน้า">◀</button>
+      <div style="flex:1;text-align:center;font-size:13px;font-weight:700">📅 ${monthLabel}</div>
+      <button class="btn btn-grey btn-sm" onclick="adminMonthNav(1)" style="padding:5px 10px;${isCurrentMonth?'opacity:.4':''}" title="เดือนถัดไป" ${isCurrentMonth?'disabled':''}>▶</button>
+      ${!isCurrentMonth ? `<button class="btn btn-grey btn-sm" onclick="adminMonthThis()" style="padding:5px 10px;font-size:11px" title="กลับเดือนปัจจุบัน">⏎ วันนี้</button>` : ""}
+    </div>
+
+    ${carryCardHtml}
+
     <div class="month-row" style="margin-bottom:12px">${empChips}</div>
     <div class="kpi-grid kpi-grid-4">
       <div class="kpi" style="border-color:#5c6bc0"><div class="kpi-label">วัน OT</div><div class="kpi-val" style="color:#9fa8da">${days}</div><div class="kpi-label">วัน</div></div>
@@ -1307,10 +1411,7 @@ function renderAdminOverview() {
     </div>
     <div style="margin-bottom:12px;text-align:right">
       ${(() => {
-        const dNow = new Date();
-        const mm = String(dNow.getMonth()+1).padStart(2,"0");
-        const yy = String(dNow.getFullYear()+543);
-        const exportUrl = withUidQS(`/api/export/monthly?month=${mm}&year=${yy}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
+        const exportUrl = withUidQS(`/api/export/monthly?month=${STATE.adminMonth}&year=${STATE.adminYear}` + (sel ? `&employee=${encodeURIComponent(sel)}` : ""));
         return `<a href="${exportUrl}" target="_blank" class="btn btn-grey btn-sm" style="text-decoration:none;display:inline-block" onclick="if(isLiffMobile()){event.preventDefault();openExternalOrShowLink('${exportUrl}','📥 ดาวน์โหลด Excel');}">📥 Export Excel ${sel?'('+sel+')':'(ทั้งเดือน)'}</a>`;
       })()}
     </div>
@@ -1323,11 +1424,11 @@ function renderAdminOverview() {
   }
 }
 
-// ★ v1.11: Heatmap สำหรับ Admin (ใช้เดือนปัจจุบัน เพราะ adminRecords ถูก filter มาแล้ว)
+// ★ v1.11: Heatmap สำหรับ Admin (ใช้เดือนที่กำลังดู)
+// ★ v1.34: ใช้ STATE.adminMonth/Year (กันแสดงผิดเดือนตอน navigate ย้อน)
 function renderAdminHeatmap(name, records) {
-  const d = new Date();
-  const yearG = d.getFullYear();
-  const monthIdx = d.getMonth();
+  const yearG = Number(STATE.adminYear) - 543;
+  const monthIdx = Number(STATE.adminMonth) - 1;
   const firstDow = new Date(yearG, monthIdx, 1).getDay();
   const daysIn = new Date(yearG, monthIdx+1, 0).getDate();
 

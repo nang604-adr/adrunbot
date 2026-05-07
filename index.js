@@ -1567,15 +1567,36 @@ app.delete("/api/admin/records/:idx", requireAdmin, async (req, res) => {
 
 // ── GET /api/admin/records — records สำหรับ Admin + Supervisor (ดูภาพรวม)
 // ★ v1.32 fix: เปลี่ยนเป็น requireSupervisor — supervisor ต้องเห็นข้อมูลภาพรวม + กราฟ
+// ★ v1.34: + pendingCarry → records pending จากเดือนก่อน (ที่ตกค้างยกยอดมา)
 app.get("/api/admin/records", requireSupervisor, async (req, res) => {
   const { month, year } = req.query;
   try {
     const sheets = await getSheetsClient();
     const all    = await getAllRecords(sheets);
+    // records ของเดือนที่เลือก
     const rows   = all.filter(r =>
       !month || r.date.includes(`/${month}/${year}`)
     );
-    res.json({ records: rows });
+
+    // ★ v1.34: pendingCarry = records pending ที่อยู่ก่อนเดือน month/year
+    //   (ตกค้างจ่ายข้ามเดือน — เกิดจากลืมลง / ลงไม่ทัน / cutoff ก่อนสิ้นเดือน)
+    let pendingCarry = [];
+    if (month && year) {
+      const m = Number(month), y = Number(year);
+      // แปลงเป็น timestamp ของวันที่ 1 เดือน month/year (พ.ศ. → ค.ศ.)
+      const monthStart = new Date(y - 543, m - 1, 1).getTime();
+      pendingCarry = all.filter(r => {
+        if (r.paidAt) return false;
+        if (r.otType === "เงินเดือน") return false;
+        if (!r.date) return false;
+        const [d, mm2, yy2] = r.date.split("/").map(Number);
+        if (!d || !mm2 || !yy2) return false;
+        const t = new Date(yy2 - 543, mm2 - 1, d).getTime();
+        return t < monthStart;
+      });
+    }
+
+    res.json({ records: rows, pendingCarry });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
