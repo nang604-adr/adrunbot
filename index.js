@@ -2353,6 +2353,21 @@ async function handleBotEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
   const text  = event.message.text.trim();
   const lower = text.toLowerCase();
+
+  // ★ v1.34: คำสั่ง #คิว — ส่งลิงค์ระบบคิวงาน
+  if (lower === "#คิว" || lower === "#queue") {
+    return client.replyMessage(event.replyToken, {
+      type: "template",
+      altText: "📋 ระบบคิวงาน Adrun",
+      template: {
+        type: "buttons",
+        title: "📋 คิวงาน Adrun",
+        text: "กดปุ่มด้านล่างเพื่อดูคิวงาน",
+        actions: [{ type: "uri", label: "🔗 เปิดคิวงาน", uri: "https://work.adrun.co.th" }],
+      },
+    });
+  }
+
   if (!lower.startsWith("#ot") && !lower.startsWith("#โอที")) return;
 
   // ★ ใช้ canonical LIFF URL — LINE จะ redirect ไป Endpoint URL ที่ตั้งไว้เอง
