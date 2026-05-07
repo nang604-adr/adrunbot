@@ -685,6 +685,142 @@ app.post("/api/ot", rateLimitByUser, async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+// ★ v1.35 LEAVE SYSTEM (Phase 1 — backend only, แยกจาก OT_Records)
+//   • Sheet: Leave_Records (auto-create บน first use)
+//   • Cols: A=name, B=date, C=leaveType, D=reason, E=createdAt
+//   • ไม่กระทบ payroll/OT logic เลย — แยกระบบสมบูรณ์
+//   ✂️ Rollback: ลบ block นี้ทั้งหมด + ลบ /api/leave* endpoints ด้านล่าง
+// ══════════════════════════════════════════════════════════════
+const VALID_LEAVE_TYPES = new Set(["ลาป่วย", "ลากิจ", "ลาพักร้อน"]);
+
+// auto-create sheet ถ้ายังไม่มี (idempotent — ทำได้หลายรอบไม่เจ็บ)
+async function ensureLeaveSheet(sheets) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const exists = meta.data.sheets.some(s => s.properties.title === "Leave_Records");
+  if (exists) return;
+  // เพิ่ม sheet ใหม่ + เขียน header rows
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    resource: { requests: [{ addSheet: { properties: { title: "Leave_Records" } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: "Leave_Records!A1:E2",
+    valueInputOption: "USER_ENTERED",
+    resource: { values: [
+      ["📋 ระบบลา (Adrun)", "", "", "", ""],
+      ["name", "date", "leaveType", "reason", "createdAt"],
+    ] },
+  });
+  console.log("✅ สร้าง sheet Leave_Records แล้ว");
+}
+
+async function getAllLeaves(sheets) {
+  await ensureLeaveSheet(sheets);
+  const r = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Leave_Records!A3:E20000",
+  });
+  return (r.data.values || []).map((row, i) => ({
+    idx: i,
+    name:      row[0] || "",
+    date:      row[1] || "",
+    leaveType: row[2] || "",
+    reason:    row[3] || "",
+    createdAt: row[4] || "",
+  }));
+}
+
+async function saveLeave(sheets, data) {
+  await ensureLeaveSheet(sheets);
+  const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: "Leave_Records!A:E",
+    valueInputOption: "USER_ENTERED",
+    resource: { values: [[ data.name, data.date, data.leaveType, data.reason || "", now ]] },
+  });
+}
+
+// ── POST /api/leave — บันทึกการลา (พนักงานคนใดก็ได้บันทึกของตัวเอง) ──
+app.post("/api/leave", rateLimitByUser, async (req, res) => {
+  const { name, date, leaveType, reason } = req.body || {};
+  if (!name || !date || !leaveType) {
+    return res.status(400).json({ error: "กรุณาระบุ name, date, leaveType" });
+  }
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(date)) {
+    return res.status(400).json({ error: "date ต้องเป็น DD/MM/YYYY (พ.ศ.)" });
+  }
+  if (!VALID_LEAVE_TYPES.has(leaveType)) {
+    return res.status(400).json({ error: `leaveType ต้องเป็น: ${[...VALID_LEAVE_TYPES].join(" / ")}` });
+  }
+  // เช็คลาย้อนหลัง
+  const [dd, mm, yyyy] = date.split("/").map(Number);
+  const leaveDate = new Date(yyyy - 543, mm - 1, dd); leaveDate.setHours(0,0,0,0);
+  const today = new Date(); today.setHours(0,0,0,0);
+  if (leaveDate < today) {
+    return res.status(400).json({ error: "ลาย้อนหลังไม่ได้ — เลือกวันที่ตั้งแต่วันนี้ขึ้นไป" });
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const all = await getAllLeaves(sheets);
+    const dup = all.find(l => l.name === name && l.date === date);
+    if (dup) {
+      return res.status(400).json({ error: `วันที่ ${date} คุณบันทึกลาไว้แล้ว (${dup.leaveType})` });
+    }
+    await saveLeave(sheets, { name, date, leaveType, reason: reason || "" });
+    console.log(`📋 Leave: ${name} ${date} ${leaveType} — ${reason || "-"}`);
+    return res.json({ ok: true, name, date, leaveType, reason: reason || "" });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /api/leave?name=&month=&year= — ดึง leave records ──
+//   - ไม่มี name → ทุกคน (สำหรับ admin/supervisor)
+//   - มี name → เฉพาะคนนั้น
+//   - มี month/year → กรองเดือน
+app.get("/api/leave", async (req, res) => {
+  const { name, month, year } = req.query;
+  try {
+    const sheets = await getSheetsClient();
+    let all = await getAllLeaves(sheets);
+    if (name)               all = all.filter(l => l.name === name);
+    if (month && year) {
+      const monthKey = `/${String(month).padStart(2,"0")}/${year}`;
+      all = all.filter(l => l.date && l.date.endsWith(monthKey));
+    }
+    return res.json({ leaves: all });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /api/leave/:idx — admin ลบ leave record ──
+app.delete("/api/leave/:idx", requireAdmin, async (req, res) => {
+  const idx = Number(req.params.idx);
+  if (!Number.isInteger(idx) || idx < 0) {
+    return res.status(400).json({ error: "idx ไม่ถูกต้อง" });
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const all = await getAllLeaves(sheets);
+    const target = all.find(l => l.idx === idx);
+    if (!target) return res.status(404).json({ error: `ไม่พบ leave idx=${idx}` });
+    // row จริง = idx + 3 (header rows 1-2 + 1-based)
+    await deleteRow(sheets, "Leave_Records", idx + 3);
+    console.log(`🗑️  ลบ leave: ${target.name} ${target.date} ${target.leaveType}`);
+    return res.json({ ok: true, idx, name: target.name, date: target.date, leaveType: target.leaveType });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ★ END LEAVE SYSTEM (Phase 1)
+// ══════════════════════════════════════════════════════════════
+
 // ── POST /api/bind-employee — Self-claim ผูกบัญชี LINE ★ v1.13
 // ★ v1.32 fix: รับ userId จาก ID token (verified) หรือ x-line-user-id header
 //   (ID token ใน LIFF inApp อาจ verify fail — fallback header)
