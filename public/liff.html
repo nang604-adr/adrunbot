@@ -503,7 +503,7 @@ const MONTHS_SHORT= ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.
 const DAYS_TH     = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 const DAYS_FULL   = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
 const EMP_COLORS  = ["#00d400","#5c6bc0","#ef6c00","#c2185b","#00bcd4","#ffd54f","#ab47bc","#26a69a"];
-const WEEKDAY_MULT = 1.5;
+const WEEKDAY_MULT = 1;  // ★ v1.34: hourlyRate คืออัตรา OT ต่อ ชม. อยู่แล้ว ไม่ต้องคูณ 1.5
 
 // ★ v1.3+v1.4: เวลางานปกติ จันทร์–เสาร์ 08:30–17:30 (ห้ามลง OT ทับ) + รองรับข้ามวัน
 const WORK_START_MIN = 8 * 60 + 30;   // 510
@@ -1825,6 +1825,37 @@ async function renderAdminPayroll() {
       </div>
     </div>
 
+    <div class="card" style="margin-top:12px;border:1px dashed rgba(255,183,77,.45)">
+      <div class="card-body">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:14px">🔧</span>
+          <span style="font-size:13px;font-weight:700;color:#ffb74d">คำนวณยอด OT ใหม่ (records ที่ยังไม่จ่าย)</span>
+        </div>
+        <div style="font-size:11px;color:var(--sub);line-height:1.7;margin-bottom:10px">
+          ใช้เมื่อเปลี่ยนสูตรคำนวณ (เช่น เปลี่ยน rate / ตัวคูณ OT) แล้วต้องการให้ records pending ตรงกับสูตรปัจจุบัน
+          — <b>ไม่แตะ records ที่จ่ายไปแล้ว</b>
+        </div>
+        <button class="btn btn-grey btn-sm" onclick="loadRecalcPreview()" style="width:100%">🔍 ตรวจดูก่อนแก้</button>
+      </div>
+    </div>
+
+    <div id="recalcPreviewArea"></div>
+
+    <div class="card" style="margin-top:12px;border:1px dashed rgba(239,154,154,.45)">
+      <div class="card-body">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span style="font-size:14px">🗑️</span>
+          <span style="font-size:13px;font-weight:700;color:#ef9a9a">เคลียร์ records "เงินเดือน" ค้าง (จาก undo รอบเก่า)</span>
+        </div>
+        <div style="font-size:11px;color:var(--sub);line-height:1.7;margin-bottom:10px">
+          ตอน commit รอบจ่าย ระบบสร้าง record "เงินเดือน (auto)" ไว้ track การจ่าย — ถ้า undo รอบนั้นจะค้างเป็น pending ทำให้รอบหน้านับซ้ำ
+        </div>
+        <button class="btn btn-grey btn-sm" onclick="loadCleanupPreview()" style="width:100%">🔍 ตรวจดูก่อนเคลียร์</button>
+      </div>
+    </div>
+
+    <div id="cleanupPreviewArea"></div>
+
     <div id="payPreviewArea"></div>
 
     <div class="card" style="margin-top:12px">
@@ -2205,6 +2236,186 @@ async function undoPayroll(payId) {
     }
     await loadPayrollHistory();
     await loadAdmin();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+// ★ v1.34: คำนวณยอด OT ใหม่ (records ที่ยังไม่จ่าย) ─────────
+async function loadRecalcPreview() {
+  const area = document.getElementById("recalcPreviewArea");
+  area.innerHTML = `<div class="card" style="margin-top:12px"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">⏳ กำลังตรวจ...</div></div>`;
+  try {
+    const res = await apiFetch("/api/payroll/recalc-preview");
+    const data = await res.json();
+    if (!res.ok) {
+      area.innerHTML = "";
+      return toast(data.error || "โหลดไม่สำเร็จ", "err");
+    }
+    if (data.count === 0) {
+      area.innerHTML = `<div class="card" style="margin-top:12px"><div style="padding:18px;text-align:center;color:#81c784;font-size:13px">✅ records ทั้งหมดตรงกับสูตรปัจจุบันแล้ว — ไม่ต้องแก้</div></div>`;
+      return;
+    }
+
+    const sign = data.totalDiff >= 0 ? "+" : "";
+    const diffColor = data.totalDiff > 0 ? "#81c784" : data.totalDiff < 0 ? "#ef9a9a" : "var(--sub)";
+
+    const rows = data.items.slice(0, 200).map(it => {
+      const dSign = it.diff >= 0 ? "+" : "";
+      const dColor = it.diff > 0 ? "#81c784" : it.diff < 0 ? "#ef9a9a" : "var(--sub)";
+      return `
+        <tr>
+          <td style="padding:6px 8px;font-size:11px">${it.name}</td>
+          <td style="padding:6px 8px;font-size:11px">${it.date}</td>
+          <td style="padding:6px 8px;font-size:11px;color:var(--sub)">${it.startTime}–${it.endTime} (${it.hours}ชม.)</td>
+          <td style="padding:6px 8px;font-size:11px;text-align:right;text-decoration:line-through;color:var(--sub)">${it.oldPay.toLocaleString()}</td>
+          <td style="padding:6px 8px;font-size:11px;text-align:right;font-weight:700">${it.newPay.toLocaleString()}</td>
+          <td style="padding:6px 8px;font-size:11px;text-align:right;color:${dColor};font-weight:700">${dSign}${it.diff.toLocaleString()}</td>
+        </tr>`;
+    }).join("");
+
+    const more = data.items.length > 200 ? `<div style="padding:8px;text-align:center;color:var(--sub);font-size:11px">… และอีก ${data.items.length - 200} รายการ</div>` : "";
+
+    area.innerHTML = `
+      <div class="card" style="margin-top:12px;border:1px solid rgba(255,183,77,.4)">
+        <div class="card-header" style="color:#ffb74d">🔧 ตัวอย่างการคำนวณใหม่</div>
+        <div class="card-body" style="padding-top:8px">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:10px;color:var(--sub)">รายการ</div>
+              <div style="font-size:16px;font-weight:700">${data.count}</div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:10px;color:var(--sub)">ยอดเดิม</div>
+              <div style="font-size:13px;font-weight:700;text-decoration:line-through;color:var(--sub)">${data.totalOldPay.toLocaleString()}</div>
+              <div style="font-size:13px;font-weight:700">${data.totalNewPay.toLocaleString()} ฿</div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:10px;color:var(--sub)">ส่วนต่าง</div>
+              <div style="font-size:16px;font-weight:700;color:${diffColor}">${sign}${data.totalDiff.toLocaleString()} ฿</div>
+            </div>
+          </div>
+
+          <div style="overflow-x:auto;max-height:300px;overflow-y:auto;border:1px solid rgba(255,255,255,.08);border-radius:8px;margin-bottom:10px">
+            <table style="width:100%;border-collapse:collapse;font-size:11px">
+              <thead style="position:sticky;top:0;background:var(--card);z-index:1">
+                <tr style="border-bottom:1px solid rgba(255,255,255,.1)">
+                  <th style="padding:8px;text-align:left;font-size:10px;color:var(--sub)">พนักงาน</th>
+                  <th style="padding:8px;text-align:left;font-size:10px;color:var(--sub)">วันที่</th>
+                  <th style="padding:8px;text-align:left;font-size:10px;color:var(--sub)">เวลา</th>
+                  <th style="padding:8px;text-align:right;font-size:10px;color:var(--sub)">เดิม</th>
+                  <th style="padding:8px;text-align:right;font-size:10px;color:var(--sub)">ใหม่</th>
+                  <th style="padding:8px;text-align:right;font-size:10px;color:var(--sub)">ต่าง</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+            ${more}
+          </div>
+
+          <button class="btn btn-green btn-sm" onclick="applyRecalc()" style="width:100%">✅ ยืนยัน — แก้ทั้งหมด ${data.count} รายการ</button>
+        </div>
+      </div>
+    `;
+  } catch (e) {
+    area.innerHTML = "";
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+async function applyRecalc() {
+  const ok = await confirmModal({
+    title: "คำนวณยอด OT ใหม่?",
+    message: "records pending จะถูกอัปเดต pay ตามสูตรปัจจุบันทันที\nการกระทำนี้ย้อนกลับไม่ได้ — แต่ไม่กระทบ records ที่จ่ายไปแล้ว",
+    okText: "🔧 ยืนยัน คำนวณใหม่",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch("/api/payroll/recalc-apply", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "แก้ไม่สำเร็จ", "err");
+    toast(`✅ แก้ไข ${data.count} รายการ (ส่วนต่างรวม ${data.totalDiff >= 0 ? "+" : ""}${data.totalDiff.toLocaleString()} ฿)`, "ok");
+    document.getElementById("recalcPreviewArea").innerHTML = "";
+    await loadAdmin();
+    await loadPayrollHistory();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+// ★ v1.34: เคลียร์ orphan auto-salary records ─────────────
+async function loadCleanupPreview() {
+  const area = document.getElementById("cleanupPreviewArea");
+  area.innerHTML = `<div class="card" style="margin-top:12px"><div style="padding:20px;text-align:center;color:var(--sub);font-size:13px">⏳ กำลังตรวจ...</div></div>`;
+  try {
+    const res = await apiFetch("/api/payroll/cleanup-orphan-salary/preview");
+    const data = await res.json();
+    if (!res.ok) {
+      area.innerHTML = "";
+      return toast(data.error || "โหลดไม่สำเร็จ", "err");
+    }
+    if (data.count === 0) {
+      area.innerHTML = `<div class="card" style="margin-top:12px"><div style="padding:18px;text-align:center;color:#81c784;font-size:13px">✅ ไม่มี records "เงินเดือน" ค้าง</div></div>`;
+      return;
+    }
+    const rows = data.items.map(it => `
+      <tr>
+        <td style="padding:6px 8px;font-size:11px">${it.name}</td>
+        <td style="padding:6px 8px;font-size:11px;color:var(--sub)">${it.date || "-"}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:right;font-weight:700">${(it.pay||0).toLocaleString()} ฿</td>
+      </tr>`).join("");
+    area.innerHTML = `
+      <div class="card" style="margin-top:12px;border:1px solid rgba(239,154,154,.4)">
+        <div class="card-header" style="color:#ef9a9a">🗑️ records "เงินเดือน" ที่จะถูกลบ</div>
+        <div class="card-body" style="padding-top:8px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:10px;color:var(--sub)">รายการ</div>
+              <div style="font-size:16px;font-weight:700">${data.count}</div>
+            </div>
+            <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
+              <div style="font-size:10px;color:var(--sub)">ยอดรวม (ที่นับซ้ำอยู่)</div>
+              <div style="font-size:16px;font-weight:700;color:#ef9a9a">${data.totalAmount.toLocaleString()} ฿</div>
+            </div>
+          </div>
+          <div style="overflow-x:auto;max-height:300px;overflow-y:auto;border:1px solid rgba(255,255,255,.08);border-radius:8px;margin-bottom:10px">
+            <table style="width:100%;border-collapse:collapse;font-size:11px">
+              <thead style="position:sticky;top:0;background:var(--card)">
+                <tr style="border-bottom:1px solid rgba(255,255,255,.1)">
+                  <th style="padding:8px;text-align:left;font-size:10px;color:var(--sub)">พนักงาน</th>
+                  <th style="padding:8px;text-align:left;font-size:10px;color:var(--sub)">cutoff เก่า</th>
+                  <th style="padding:8px;text-align:right;font-size:10px;color:var(--sub)">ยอด</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <button class="btn btn-green btn-sm" onclick="applyCleanup()" style="width:100%">🗑️ ลบทั้งหมด ${data.count} รายการ</button>
+        </div>
+      </div>`;
+  } catch (e) {
+    area.innerHTML = "";
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
+}
+
+async function applyCleanup() {
+  const ok = await confirmModal({
+    title: "ลบ records 'เงินเดือน' ค้าง?",
+    message: "records พวกนี้เป็น auto-record ที่สร้างมาเพื่อ track salary payment — ลบทิ้งได้ปลอดภัย\nการกระทำนี้ย้อนกลับไม่ได้",
+    okText: "🗑️ ลบทั้งหมด",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch("/api/payroll/cleanup-orphan-salary/apply", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "ลบไม่สำเร็จ", "err");
+    toast(`✅ ลบ ${data.deleted} รายการ (รวม ${(data.totalAmount||0).toLocaleString()} ฿)`, "ok");
+    document.getElementById("cleanupPreviewArea").innerHTML = "";
+    await loadAdmin();
+    await loadPayrollHistory();
   } catch (e) {
     toast("เชื่อมต่อไม่ได้", "err");
   }

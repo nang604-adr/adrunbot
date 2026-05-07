@@ -330,7 +330,7 @@ function withOTMutex(key, fn) {
 
 // ── OT Rules ─────────────────────────────────────────────────
 const MAX_OT_PER_DAY     = 5;
-const WEEKDAY_MULTIPLIER = 1.5;
+const WEEKDAY_MULTIPLIER = 1;  // ★ v1.34: hourlyRate ที่กรอกใน Employees คืออัตราค่า OT ต่อ ชม. อยู่แล้ว ไม่ต้องคูณ 1.5 ซ้ำ
 
 // ★ v1.3: เวลางานปกติ จันทร์–เสาร์ (ห้ามลง OT ทับ)
 const WORK_START_MIN     = 8 * 60 + 30;   // 08:30 = 510
@@ -821,8 +821,10 @@ app.get("/api/payroll/preview", requireAdmin, async (req, res) => {
   try {
     const sheets  = await getSheetsClient();
     const all     = await getAllRecords(sheets);
-    const pending = all.filter(r => !r.paidAt && r.name && r.date && isOnOrBeforeCutoff(r.date, cutoff));
-    const carry   = all.filter(r => !r.paidAt && r.name && r.date && !isOnOrBeforeCutoff(r.date, cutoff));
+    // ★ v1.34: ตัด orphan auto-salary records (otType="เงินเดือน") ออกจาก pending
+    //   — กันบวกซ้ำกับ empData.salary (เกิดเมื่อ undo รอบจ่ายเก่าที่มี salary records)
+    const pending = all.filter(r => !r.paidAt && r.name && r.date && r.otType !== "เงินเดือน" && isOnOrBeforeCutoff(r.date, cutoff));
+    const carry   = all.filter(r => !r.paidAt && r.name && r.date && r.otType !== "เงินเดือน" && !isOnOrBeforeCutoff(r.date, cutoff));
 
     // group by employee + ดึง travelAllowance/socialSecurity จาก Employees
     const employees = await getEmployees(sheets);
@@ -900,7 +902,8 @@ app.post("/api/payroll/commit", requireAdmin, async (req, res) => {
   try {
     const sheets = await getSheetsClient();
     const all    = await getAllRecords(sheets);
-    const pending = all.filter(r => !r.paidAt && r.name && r.date && isOnOrBeforeCutoff(r.date, cutoff));
+    // ★ v1.34: ตัด orphan auto-salary records ออก (กันบวกซ้ำกับ empData.salary)
+    const pending = all.filter(r => !r.paidAt && r.name && r.date && r.otType !== "เงินเดือน" && isOnOrBeforeCutoff(r.date, cutoff));
 
     if (pending.length === 0) return res.status(400).json({ error: "ไม่มีรายการให้จ่ายในรอบนี้" });
 
@@ -1032,9 +1035,15 @@ app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
     const all    = await getAllRecords(sheets);
     const target = all.filter(r => r.paidAt === payId);
 
-    // ปลด column K ของ records (ถ้ามี)
-    if (target.length > 0) {
-      const updates = target.map(r => ({
+    // ★ v1.34: แยก records 2 ประเภท
+    //   - "เงินเดือน" auto-records → DELETE ทิ้ง (ไม่ใช่ OT จริง สร้างมาเพื่อ track salary)
+    //   - records OT/holiday จริง   → ปลด column K (paidAt) คืน เป็น pending
+    const autoSalaryRecs = target.filter(r => r.otType === "เงินเดือน");
+    const realOtRecs     = target.filter(r => r.otType !== "เงินเดือน");
+
+    // ปลด column K ของ OT records จริง
+    if (realOtRecs.length > 0) {
+      const updates = realOtRecs.map(r => ({
         range: `OT_Records!K${idxToRow(r.idx)}`,
         values: [[""]],
       }));
@@ -1042,6 +1051,19 @@ app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
         spreadsheetId: SHEET_ID,
         resource: { valueInputOption: "USER_ENTERED", data: updates },
       });
+    }
+
+    // ลบ auto-salary records ทิ้ง — ลบจาก row สูงไปต่ำ (กัน index shift)
+    if (autoSalaryRecs.length > 0) {
+      const sortedDesc = [...autoSalaryRecs].sort((a, b) => b.idx - a.idx);
+      for (const r of sortedDesc) {
+        try {
+          await deleteRow(sheets, "OT_Records", idxToRow(r.idx));
+        } catch (delErr) {
+          console.error(`ลบ salary record row ${idxToRow(r.idx)} ไม่สำเร็จ:`, delErr.message);
+        }
+      }
+      console.log(`🗑️  ลบ auto-salary records ${autoSalaryRecs.length} แถว (payId=${payId})`);
     }
 
     // ★ v1.17.5: อัปเดต Payroll_Log status = "undone" — ทุก row ที่ match payId (กันมี duplicate)
@@ -1082,9 +1104,189 @@ app.post("/api/payroll/undo", requireAdmin, async (req, res) => {
     res.json({
       ok: true,
       payId,
-      recordsRestored: target.length,
+      recordsRestored: realOtRecs.length,           // ★ v1.34
+      autoSalaryDeleted: autoSalaryRecs.length,     // ★ v1.34
       logCleanedOnly: target.length === 0,
       logRowsUpdated: logUpdated,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.34: CLEANUP ORPHAN AUTO-SALARY RECORDS
+//   หลังจาก undo รอบจ่ายเก่า — auto-salary records (otType="เงินเดือน")
+//   จะค้างเป็น pending ทำให้ preview/commit นับ salary ซ้ำ
+//   endpoint นี้สแกนหา records พวกนี้แล้วลบทิ้ง (ไม่ใช่ OT จริง)
+// ══════════════════════════════════════════════════════════════
+app.get("/api/payroll/cleanup-orphan-salary/preview", requireAdmin, async (req, res) => {
+  try {
+    const sheets = await getSheetsClient();
+    const all = await getAllRecords(sheets);
+    const orphans = all.filter(r => r.otType === "เงินเดือน" && !r.paidAt && r.name);
+    res.json({
+      ok: true,
+      count: orphans.length,
+      totalAmount: orphans.reduce((s, r) => s + (r.pay || 0), 0),
+      items: orphans.map(r => ({
+        idx: r.idx, row: idxToRow(r.idx),
+        name: r.name, date: r.date, pay: r.pay,
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/payroll/cleanup-orphan-salary/apply", requireAdmin, async (req, res) => {
+  try {
+    const sheets = await getSheetsClient();
+    const all = await getAllRecords(sheets);
+    const orphans = all.filter(r => r.otType === "เงินเดือน" && !r.paidAt && r.name);
+
+    if (orphans.length === 0) {
+      return res.json({ ok: true, deleted: 0, message: "ไม่มี records ค้าง" });
+    }
+
+    // ลบจาก row สูงไปต่ำ (กัน index shift)
+    const sortedDesc = [...orphans].sort((a, b) => b.idx - a.idx);
+    let deleted = 0;
+    for (const r of sortedDesc) {
+      try {
+        await deleteRow(sheets, "OT_Records", idxToRow(r.idx));
+        deleted++;
+      } catch (delErr) {
+        console.error(`ลบ row ${idxToRow(r.idx)} ไม่สำเร็จ:`, delErr.message);
+      }
+    }
+    console.log(`🗑️  Cleanup orphan auto-salary: ลบ ${deleted}/${orphans.length} แถว`);
+    res.json({
+      ok: true,
+      deleted,
+      totalAmount: orphans.slice(0, deleted).reduce((s, r) => s + (r.pay || 0), 0),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.34: RECALC PENDING — คำนวณใหม่ records ที่ยังไม่จ่าย
+//   ใช้เวลาเปลี่ยนสูตร (เช่น เปลี่ยน WEEKDAY_MULTIPLIER)
+//   เพื่อปรับ pay ของ records ที่ค้างอยู่ให้ตรงกับสูตรปัจจุบัน
+// ══════════════════════════════════════════════════════════════
+
+// helper: คำนวณ pay ที่ "ควรจะเป็น" สำหรับ record หนึ่งตัว ตามสูตรปัจจุบัน
+function expectedPay(rec, emp) {
+  if (!emp) return null;
+  if (rec.otType === "วันธรรมดา") {
+    return Math.round((rec.hours || 0) * (emp.hourlyRate || 0) * WEEKDAY_MULTIPLIER);
+  }
+  // วันหยุด/อาทิตย์/ตจว. — ใช้ flat rate
+  if (rec.otType && rec.otType.includes("ต่างจังหวัด")) {
+    return Math.round(emp.outProvinceFlat || 0);
+  }
+  // เงินเดือน auto record — ไม่แตะ
+  if (rec.otType === "เงินเดือน") return rec.pay;
+  return Math.round(emp.holidayFlat || 0);
+}
+
+// ── GET /api/payroll/recalc-preview — ดู diff ก่อน apply ──
+app.get("/api/payroll/recalc-preview", requireAdmin, async (req, res) => {
+  try {
+    const sheets    = await getSheetsClient();
+    const all       = await getAllRecords(sheets);
+    const employees = await getEmployees(sheets);
+    const empMap    = Object.fromEntries(employees.map(e => [e.name, e]));
+
+    const diffs = [];
+    for (const r of all) {
+      if (r.paidAt) continue;             // ข้าม records ที่จ่ายแล้ว
+      if (!r.name)  continue;
+      if (r.otType === "เงินเดือน") continue; // ข้าม salary auto records
+      const emp = empMap[r.name];
+      if (!emp) continue;
+      const newPay = expectedPay(r, emp);
+      if (newPay === null) continue;
+      if (newPay !== r.pay) {
+        diffs.push({
+          idx: r.idx,
+          row: idxToRow(r.idx),
+          name: r.name,
+          date: r.date,
+          startTime: r.startTime,
+          endTime: r.endTime,
+          hours: r.hours,
+          otType: r.otType,
+          oldPay: r.pay,
+          newPay,
+          diff: newPay - r.pay,
+        });
+      }
+    }
+
+    res.json({
+      ok: true,
+      formula: { weekdayMultiplier: WEEKDAY_MULTIPLIER },
+      count: diffs.length,
+      totalOldPay: diffs.reduce((s, d) => s + d.oldPay, 0),
+      totalNewPay: diffs.reduce((s, d) => s + d.newPay, 0),
+      totalDiff:   diffs.reduce((s, d) => s + d.diff,   0),
+      items: diffs,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/payroll/recalc-apply — ลงมือแก้ pay ในชีต ──
+app.post("/api/payroll/recalc-apply", requireAdmin, async (req, res) => {
+  try {
+    const sheets    = await getSheetsClient();
+    const all       = await getAllRecords(sheets);
+    const employees = await getEmployees(sheets);
+    const empMap    = Object.fromEntries(employees.map(e => [e.name, e]));
+
+    const updates = [];
+    const applied = [];
+    for (const r of all) {
+      if (r.paidAt) continue;
+      if (!r.name)  continue;
+      if (r.otType === "เงินเดือน") continue;
+      const emp = empMap[r.name];
+      if (!emp) continue;
+      const newPay = expectedPay(r, emp);
+      if (newPay === null) continue;
+      if (newPay !== r.pay) {
+        const row = idxToRow(r.idx);
+        updates.push({
+          range: `OT_Records!I${row}`,    // col I = pay
+          values: [[newPay]],
+        });
+        applied.push({ name: r.name, date: r.date, oldPay: r.pay, newPay, row });
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.json({ ok: true, count: 0, message: "ไม่มี records ที่ต้องแก้" });
+    }
+
+    // batch update เป็น chunk ละ 100 row กัน timeout
+    for (let i = 0; i < updates.length; i += 100) {
+      const chunk = updates.slice(i, i + 100);
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: { valueInputOption: "USER_ENTERED", data: chunk },
+      });
+    }
+
+    console.log(`🔧 Recalc applied: ${applied.length} records updated`);
+    res.json({
+      ok: true,
+      count: applied.length,
+      totalDiff: applied.reduce((s, a) => s + (a.newPay - a.oldPay), 0),
+      applied,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
