@@ -1533,6 +1533,38 @@ app.get("/api/payroll/history", requireAdmin, async (req, res) => {
   }
 });
 
+// ── DELETE /api/admin/records/:idx — ★ v1.34: Admin force-delete OT record (ฉุกเฉิน)
+//   ใช้กรณีพนักงาน login เข้าระบบไม่ได้ → admin ลบให้แทน
+//   เงื่อนไข: record ต้องยังไม่จ่าย (paidAt ว่าง) — ถ้าจ่ายแล้วต้อง undo รอบก่อน
+app.delete("/api/admin/records/:idx", requireAdmin, async (req, res) => {
+  const idx = Number(req.params.idx);
+  if (!Number.isInteger(idx) || idx < 0) {
+    return res.status(400).json({ error: "idx ไม่ถูกต้อง" });
+  }
+  try {
+    const sheets = await getSheetsClient();
+    const all    = await getAllRecords(sheets);
+    const target = all.find(r => r.idx === idx);
+    if (!target) return res.status(404).json({ error: `ไม่พบ record idx=${idx}` });
+    if (target.paidAt) {
+      return res.status(400).json({ error: `record นี้จ่ายไปแล้ว (รอบ ${target.paidAt}) ลบไม่ได้ — ต้อง undo รอบจ่ายก่อน` });
+    }
+    await deleteRow(sheets, "OT_Records", idxToRow(idx));
+    const adminName = req.headers["x-admin-name"] || "Admin";
+    console.log(`🗑️  Admin force-delete: ${target.name} ${target.date} (idx=${idx}, by ${adminName})`);
+    res.json({
+      ok: true,
+      idx,
+      name: target.name,
+      date: target.date,
+      otType: target.otType,
+      pay: target.pay,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── GET /api/admin/records — records สำหรับ Admin + Supervisor (ดูภาพรวม)
 // ★ v1.32 fix: เปลี่ยนเป็น requireSupervisor — supervisor ต้องเห็นข้อมูลภาพรวม + กราฟ
 app.get("/api/admin/records", requireSupervisor, async (req, res) => {

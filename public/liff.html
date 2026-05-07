@@ -1379,13 +1379,15 @@ function renderAdminHeatmap(name, records) {
     `📅 ปฏิทิน OT — ${name} · ${MONTHS_SHORT[monthIdx]} ${yearG+543}`;
 }
 
-// ★ v1.11: List of records for selected employee (admin view, no edit button)
+// ★ v1.11: List of records for selected employee (admin view)
+// ★ v1.34: + ปุ่มลบฉุกเฉินสำหรับ admin (กรณีพนักงานล็อกอินไม่ได้)
 function renderAdminEmpList(name, records) {
   if (!records.length) {
     document.getElementById("adminEmpList").innerHTML =
       `<div style="padding:24px;text-align:center;color:var(--sub);font-size:13px">ยังไม่มีรายการ OT เดือนนี้</div>`;
     return;
   }
+  const isAdmin = STATE.role === "admin";
   const html = records.slice().reverse().map(r => {
     const [dd,mm,yy] = r.date.split("/");
     const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
@@ -1394,6 +1396,16 @@ function renderAdminEmpList(name, records) {
     const rowBg = isWday ? "" : "background:rgba(255,213,79,.03)";
     const dateBoxStyle = isWday ? "" : "border:1px solid rgba(255,213,79,.2)";
     const ddColor = isWday ? "" : "color:#ffd54f";
+    const empName = (r.name || name || "").replace(/'/g, "\\'");
+    const desc = isWday ? `${r.startTime}–${r.endTime}` : r.otType;
+    // ปุ่มลบ (admin only):
+    //   - record ที่จ่ายแล้ว → ปุ่มถูก disabled (ต้อง undo รอบก่อน)
+    //   - record ที่ยัง pending → ลบได้
+    const deleteBtn = isAdmin
+      ? (isPaid
+          ? `<button class="btn btn-grey btn-sm" disabled title="จ่ายแล้ว ลบไม่ได้ — undo รอบก่อน" style="opacity:.4;cursor:not-allowed;padding:5px 8px">🔒</button>`
+          : `<button class="btn btn-grey btn-sm" onclick="adminDeleteRecord(${r.idx},'${empName}','${r.date}','${desc}',${r.pay||0})" title="ลบ record นี้ (ฉุกเฉิน)" style="padding:5px 8px;color:#ef9a9a">🗑️</button>`)
+      : "";
     return `
       <div class="ot-row" style="${rowBg}">
         <div style="display:flex;align-items:flex-start;gap:10px">
@@ -1409,10 +1421,31 @@ function renderAdminEmpList(name, records) {
             </div>
             ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub)">📝 ${esc(r.task)}${r.location?" · 📍"+r.location:""}</div>`:""}
           </div>
+          ${deleteBtn}
         </div>
       </div>`;
   }).join("");
   document.getElementById("adminEmpList").innerHTML = html;
+}
+
+// ★ v1.34: Admin ลบ OT record ฉุกเฉิน
+async function adminDeleteRecord(idx, name, date, desc, pay) {
+  const ok = await confirmModal({
+    title: "🚨 ลบ record ฉุกเฉิน?",
+    message: `พนักงาน: ${name}\nวันที่: ${date}\nรายละเอียด: ${desc}\nยอด: ${(pay||0).toLocaleString()} ฿\n\n⚠️ ใช้กรณีพนักงาน login ไม่ได้เท่านั้น\nการกระทำนี้ย้อนกลับไม่ได้`,
+    okText: "🗑️ ยืนยันลบ",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch(`/api/admin/records/${idx}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "ลบไม่สำเร็จ", "err");
+    toast(`✅ ลบ record ของ ${data.name} (${data.date}) แล้ว`, "ok");
+    await loadAdmin();
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
 }
 
 // ★ v1.12: Admin Chart with 3 modes (daily / ranking / compare) + sorting
@@ -1825,35 +1858,28 @@ async function renderAdminPayroll() {
       </div>
     </div>
 
-    <div class="card" style="margin-top:12px;border:1px dashed rgba(255,183,77,.45)">
-      <div class="card-body">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="font-size:14px">🔧</span>
-          <span style="font-size:13px;font-weight:700;color:#ffb74d">คำนวณยอด OT ใหม่ (records ที่ยังไม่จ่าย)</span>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px">
+      <div class="card" style="border:1px dashed rgba(255,183,77,.45);margin:0">
+        <div class="card-body" style="padding:10px">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span style="font-size:14px">🔧</span>
+            <span style="font-size:11px;font-weight:700;color:#ffb74d">อัพเดทเรทใหม่</span>
+          </div>
+          <button class="btn btn-grey btn-sm" onclick="loadRecalcPreview()" style="width:100%;font-size:11px">🔍 Review</button>
         </div>
-        <div style="font-size:11px;color:var(--sub);line-height:1.7;margin-bottom:10px">
-          ใช้เมื่อเปลี่ยนสูตรคำนวณ (เช่น เปลี่ยน rate / ตัวคูณ OT) แล้วต้องการให้ records pending ตรงกับสูตรปัจจุบัน
-          — <b>ไม่แตะ records ที่จ่ายไปแล้ว</b>
+      </div>
+      <div class="card" style="border:1px dashed rgba(239,154,154,.45);margin:0">
+        <div class="card-body" style="padding:10px">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span style="font-size:14px">🗑️</span>
+            <span style="font-size:11px;font-weight:700;color:#ef9a9a">Clear เงินเดือนค้าง</span>
+          </div>
+          <button class="btn btn-grey btn-sm" onclick="loadCleanupPreview()" style="width:100%;font-size:11px">🔍 Review</button>
         </div>
-        <button class="btn btn-grey btn-sm" onclick="loadRecalcPreview()" style="width:100%">🔍 ตรวจดูก่อนแก้</button>
       </div>
     </div>
 
     <div id="recalcPreviewArea"></div>
-
-    <div class="card" style="margin-top:12px;border:1px dashed rgba(239,154,154,.45)">
-      <div class="card-body">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span style="font-size:14px">🗑️</span>
-          <span style="font-size:13px;font-weight:700;color:#ef9a9a">เคลียร์ records "เงินเดือน" ค้าง (จาก undo รอบเก่า)</span>
-        </div>
-        <div style="font-size:11px;color:var(--sub);line-height:1.7;margin-bottom:10px">
-          ตอน commit รอบจ่าย ระบบสร้าง record "เงินเดือน (auto)" ไว้ track การจ่าย — ถ้า undo รอบนั้นจะค้างเป็น pending ทำให้รอบหน้านับซ้ำ
-        </div>
-        <button class="btn btn-grey btn-sm" onclick="loadCleanupPreview()" style="width:100%">🔍 ตรวจดูก่อนเคลียร์</button>
-      </div>
-    </div>
-
     <div id="cleanupPreviewArea"></div>
 
     <div id="payPreviewArea"></div>
