@@ -612,7 +612,7 @@ app.delete("/api/holidays/:idx", requireAdmin, async (req, res) => {
 // ★ v1.30 BUG-04: wrap ด้วย mutex ต่อ (name|date) กัน race
 // ★ v1.31 D3: rate limit
 app.post("/api/ot", rateLimitByUser, async (req, res) => {
-  const { name, date, startTime, endTime, task, location, otType } = req.body;
+  const { name, date, startTime, endTime, task, location, otType, nightShift } = req.body;
   if (!name || !date) return res.status(400).json({ error: "ต้องระบุชื่อและวันที่" });
   try {
     return await withOTMutex(`${name}|${date}`, async () => {
@@ -662,11 +662,12 @@ app.post("/api/ot", rateLimitByUser, async (req, res) => {
       return res.status(400).json({ error: `ช่วง ${workWindowLabel(workEndMin)} เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้` });
     }
 
-    // ★ v1.21: ห้ามบันทึกทับกับ record ในวันเดียวกัน
-    const overlap = await findOverlappingRecord(sheets, name, date, startTime, endTime);
+    // ★ v1.21+v1.36: ห้ามทับ — รองรับ nightShift
+    const overlap = await findOverlappingRecord(sheets, name, date, startTime, endTime, !!nightShift);
     if (overlap) {
+      const shiftHint = overlap.nightShift ? " (กลางคืน)" : "";
       return res.status(400).json({
-        error: `ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime} (${overlap.hours} ชม.) ในวันเดียวกัน — ใช้ปุ่ม 🔧 ขอแก้ไขแทน`,
+        error: `ช่วง ${startTime}-${endTime} ทับกับรายการเดิม ${overlap.startTime}-${overlap.endTime}${shiftHint} (${overlap.hours} ชม.) — ใช้ปุ่ม 🔧 ขอแก้ไขแทน`,
       });
     }
 
@@ -676,8 +677,12 @@ app.post("/api/ot", rateLimitByUser, async (req, res) => {
     const payableHours      = Math.min(hours, remainingPayable);
     const pay = Math.round(payableHours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
 
-    await saveRecord(sheets, { name, date, startTime, endTime, hours, task, location, otType: "วันธรรมดา", pay });
-    return res.json({ ok: true, hours, payableHours, pay, otType: "วันธรรมดา", capped: payableHours < hours });
+    await saveRecord(sheets, {
+      name, date, startTime, endTime, hours, task, location,
+      otType: "วันธรรมดา", pay,
+      nightShift: !!nightShift,   // ★ v1.36
+    });
+    return res.json({ ok: true, hours, payableHours, pay, otType: "วันธรรมดา", capped: payableHours < hours, nightShift: !!nightShift });
     });  // end withOTMutex
 
   } catch (e) {
@@ -1388,6 +1393,20 @@ app.post("/api/payroll/cleanup-orphan-salary/apply", requireAdmin, async (req, r
   }
 });
 
+// ── helper: เขียน header col L ใน OT_Records ครั้งแรก (★ v1.36) ──
+//   เรียกครั้งเดียว — ถ้ามีอยู่แล้วจะ overwrite ค่าเดิม (TRUE/FALSE) ไม่กระทบ data row
+async function ensureNightShiftHeader(sheets) {
+  try {
+    // เขียน header แค่ row 2 (header row) — ไม่แตะ data
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: "OT_Records!L2",
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [["nightShift"]] },
+    });
+  } catch (e) { /* silent */ }
+}
+
 // ══════════════════════════════════════════════════════════════
 // ★ v1.34: RECALC PENDING — คำนวณใหม่ records ที่ยังไม่จ่าย
 //   ใช้เวลาเปลี่ยนสูตร (เช่น เปลี่ยน WEEKDAY_MULTIPLIER)
@@ -1859,7 +1878,7 @@ app.put("/api/edit-requests/:idx", requireAdmin, async (req, res) => {
 // ★ v1.22.1: รองรับทั้ง weekday + holiday + delete record
 app.post("/api/edit-requests/:idx/apply", requireAdmin, async (req, res) => {
   const reqIdx = Number(req.params.idx);
-  const { action, newStartTime, newEndTime, newTask, newLocation, newDate } = req.body;
+  const { action, newStartTime, newEndTime, newTask, newLocation, newDate, newNightShift } = req.body;
   // action: "edit" (default) | "delete"
   try {
     const sheets = await getSheetsClient();
@@ -1934,33 +1953,31 @@ app.post("/api/edit-requests/:idx/apply", requireAdmin, async (req, res) => {
       const newHours = calcHours(newStartTime, newEndTime);
       if (newHours <= 0) return res.status(400).json({ error: "เวลาสิ้นสุดต้องมากกว่าเริ่มต้น" });
 
-      // Check overlap with OTHER same-day records (skip target itself)
-      const others = all.filter(r =>
-        r.name === reqName && r.date === reqDate &&
-        r.otType === "วันธรรมดา" && r.idx !== target.idx &&
-        r.startTime !== "-" && r.endTime !== "-"
-      );
-      const toMin = t => { const [h,m] = t.split(":").map(Number); return h*60+m; };
-      let nS = toMin(newStartTime), nE = toMin(newEndTime);
-      if (nE < nS) nE += 1440;
-      for (const r of others) {
-        let s = toMin(r.startTime), e = toMin(r.endTime);
-        if (e < s) e += 1440;
-        if (nS < e && s < nE) {
-          return res.status(400).json({ error: `ช่วงใหม่ ${newStartTime}-${newEndTime} ทับกับรายการอื่น ${r.startTime}-${r.endTime}` });
-        }
+      // ★ v1.36: ใช้ findOverlappingRecord ตัวใหม่ (รองรับ nightShift + excludeIdx)
+      // ถ้า client ไม่ส่ง newNightShift → ใช้ค่าเดิมจาก target
+      const finalNightShift = (newNightShift === undefined) ? target.nightShift : !!newNightShift;
+      const editDateForCheck = newDate || target.date;
+      const overlap = await findOverlappingRecord(sheets, reqName, editDateForCheck, newStartTime, newEndTime, finalNightShift, target.idx);
+      if (overlap) {
+        const shiftHint = overlap.nightShift ? " (กลางคืน)" : "";
+        return res.status(400).json({ error: `ช่วงใหม่ ${newStartTime}-${newEndTime} ทับกับรายการอื่น ${overlap.startTime}-${overlap.endTime}${shiftHint}` });
       }
 
-      // Recalc pay
+      // Recalc pay — รวมชั่วโมงจาก records อื่นในวันเดียวกัน (สำหรับ MAX_OT_PER_DAY cap)
       const employees = await getEmployees(sheets);
       const emp = employees.find(e => e.name === reqName);
       if (!emp) return res.status(400).json({ error: `ไม่พบพนักงาน ${reqName}` });
-      const otherHours = others.reduce((s, r) => s + r.hours, 0);
+      const sameDay = all.filter(r =>
+        r.name === reqName && r.date === editDateForCheck &&
+        r.otType === "วันธรรมดา" && r.idx !== target.idx &&
+        r.startTime !== "-" && r.endTime !== "-"
+      );
+      const otherHours = sameDay.reduce((s, r) => s + r.hours, 0);
       const remainingPayable = Math.max(0, MAX_OT_PER_DAY - otherHours);
       const payableHours = Math.min(newHours, remainingPayable);
       const newPay = Math.round(payableHours * emp.hourlyRate * WEEKDAY_MULTIPLIER);
 
-      // Update OT_Records row (B-I: date, startTime, endTime, hours, task, location, otType, pay)
+      // Update OT_Records row (B-I + L) — col L = nightShift
       const targetRow = idxToRow(target.idx);
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
@@ -1971,6 +1988,13 @@ app.post("/api/edit-requests/:idx/apply", requireAdmin, async (req, res) => {
           newStartTime, newEndTime, newHours,
           newTask, newLocation || "", "วันธรรมดา", newPay,
         ]] },
+      });
+      // อัพเดท col L แยก (กัน J,K โดน overwrite)
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `OT_Records!L${targetRow}`,
+        valueInputOption: "USER_ENTERED",
+        resource: { values: [[ finalNightShift ? "TRUE" : "FALSE" ]] },
       });
 
       // Mark approved
@@ -2420,14 +2444,15 @@ async function getHolidayList(sheets) {
 async function getAllRecords(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "OT_Records!A3:K20000",  // ★ v1.15: เพิ่ม column K (paidAt)
+    range: "OT_Records!A3:L20000",  // ★ v1.36: + col L (nightShift)
   });
   return (r.data.values || []).map((row, i) => ({
     idx: i, name: row[0]||"", date: row[1]||"",
     startTime: row[2]||"-", endTime: row[3]||"-",
     hours: Number(row[4])||0, task: row[5]||"", location: row[6]||"",
     otType: row[7]||"", pay: Number(row[8])||0, createdAt: row[9]||"",
-    paidAt: (row[10]||"").trim(),  // ★ v1.15: ID รอบจ่ายเงิน (เช่น "PAY-20260528-1430")
+    paidAt: (row[10]||"").trim(),  // ★ v1.15: ID รอบจ่ายเงิน
+    nightShift: String(row[11]||"").toUpperCase() === "TRUE",  // ★ v1.36: night shift flag
   }));
 }
 
@@ -2437,39 +2462,48 @@ async function getDayHours(sheets, name, date) {
             .reduce((s, r) => s + r.hours, 0);
 }
 
-// ★ v1.21+v1.33: ตรวจช่วงเวลาทับกับ record อื่น
-//   v1.33: ครอบคลุม cross-day overlap — record วันก่อนหน้าที่ข้ามวันมาทับ + record วันถัดไปที่ shift ไปต้น
-async function findOverlappingRecord(sheets, name, date, newStart, newEnd) {
+// ★ v1.21+v1.33+v1.36: ตรวจช่วงเวลาทับกับ record อื่น (absolute time + nightShift support)
+//   v1.36: รองรับ "ช่วงเช้ามืด vs กลางคืน" — กลางคืน shift +1 วัน
+async function findOverlappingRecord(sheets, name, date, newStart, newEnd, newNightShift, excludeIdx) {
   const all = await getAllRecords(sheets);
   const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
 
-  // หาวันก่อน + วันถัดไป (เพื่อครอบคลุม cross-day record)
+  // ขยายเช็คช่วง prev2/prev/curr/next/next2 (5 วัน) — ครอบคลุม nightShift ทุกทิศทาง
   const [dd, mm, yy] = date.split("/").map(Number);
   const dt = new Date(yy - 543, mm - 1, dd);
   const fmt = d => `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()+543}`;
-  const prevDate = fmt(new Date(dt.getTime() - 86400000));
-  const nextDate = fmt(new Date(dt.getTime() + 86400000));
+  const dateRange = [-2, -1, 0, 1, 2].map(off => fmt(new Date(dt.getTime() + off * 86400000)));
 
   const candidates = all.filter(r =>
     r.name === name &&
-    (r.date === date || r.date === prevDate || r.date === nextDate) &&
+    (excludeIdx === undefined || r.idx !== excludeIdx) &&
+    dateRange.includes(r.date) &&
     r.otType === "วันธรรมดา" &&
     r.startTime !== "-" && r.endTime !== "-"
   );
 
-  // แปลง new range → absolute timeline (อิงวันของ record ใหม่)
-  let nS = toMin(newStart);
-  let nE = toMin(newEnd);
-  if (nE < nS) nE += 1440; // cross-midnight
+  // คำนวณ absolute time (นาทีจาก epoch ของวันที่ใหม่ที่เลือก)
+  // - เริ่มจาก toMin(time)
+  // - ถ้า end<start → +1440 (cross-midnight)
+  // - ถ้า nightShift → +1440 ทั้ง start, end
+  // - ถ้า record อยู่วัน prev/next → shift ตาม diff
+  function abs(rDate, sStr, eStr, isNight) {
+    let s = toMin(sStr);
+    let e = toMin(eStr);
+    if (e < s) e += 1440;
+    if (isNight) { s += 1440; e += 1440; }
+    // shift ตามต่างวันจาก date ใหม่
+    const [d2, m2, y2] = rDate.split("/").map(Number);
+    const diffDays = Math.round((new Date(y2-543, m2-1, d2).getTime() - dt.getTime()) / 86400000);
+    s += diffDays * 1440;
+    e += diffDays * 1440;
+    return [s, e];
+  }
+
+  const [nS, nE] = abs(date, newStart, newEnd, !!newNightShift);
 
   for (const r of candidates) {
-    let s = toMin(r.startTime);
-    let e = toMin(r.endTime);
-    if (e < s) e += 1440; // record เก่าข้ามคืน
-    // Shift r ตามวัน — ให้อยู่บน timeline เดียวกับ new
-    if (r.date === prevDate)      { s -= 1440; e -= 1440; }
-    else if (r.date === nextDate) { s += 1440; e += 1440; }
-    // เช็ค overlap ปกติ
+    const [s, e] = abs(r.date, r.startTime, r.endTime, r.nightShift);
     if (nS < e && s < nE) return r;
   }
   return null;
@@ -2477,14 +2511,17 @@ async function findOverlappingRecord(sheets, name, date, newStart, newEnd) {
 
 async function saveRecord(sheets, data) {
   const now = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+  // ★ v1.36: เขียน A-L (12 columns) — col K=paidAt ว่าง, col L=nightShift
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
-    range: "OT_Records!A:J",
+    range: "OT_Records!A:L",
     valueInputOption: "USER_ENTERED",
     resource: { values: [[
       data.name, data.date, data.startTime, data.endTime,
       data.hours, data.task, data.location || "",
       data.otType, data.pay, now,
+      "",                                   // col K: paidAt (empty)
+      data.nightShift ? "TRUE" : "FALSE",   // col L: nightShift ★ v1.36
     ]] },
   });
 }
