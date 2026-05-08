@@ -2640,6 +2640,20 @@ async function handleBotEvent(event) {
     });
   }
 
+  // ★ v1.36: คำสั่ง #cal — ส่งลิงค์เว็บคำนวณไฟฟ้า
+  if (lower === "#cal" || lower === "#คำนวณ") {
+    return client.replyMessage(event.replyToken, {
+      type: "template",
+      altText: "⚡ เครื่องคำนวณไฟฟ้า Adrun",
+      template: {
+        type: "buttons",
+        title: "⚡ คำนวณไฟฟ้า Adrun",
+        text: "กดปุ่มด้านล่างเพื่อเปิดเครื่องคำนวณ",
+        actions: [{ type: "uri", label: "🔗 เปิดเครื่องคำนวณ", uri: "https://adrun-cal-power.netlify.app" }],
+      },
+    });
+  }
+
   if (!lower.startsWith("#ot") && !lower.startsWith("#โอที")) return;
 
   // ★ ใช้ canonical LIFF URL — LINE จะ redirect ไป Endpoint URL ที่ตั้งไว้เอง
