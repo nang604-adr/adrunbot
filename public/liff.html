@@ -1438,6 +1438,10 @@ function selectAdminEmp(name) {
 function renderAdminOverview() {
   const sel = STATE.adminEmpView; // "" = ทั้งหมด
 
+  // ★ v1.36: เก็บ scroll position ของ chip row ก่อน re-render (กันเด้งซ้าย)
+  const oldChipRow = document.getElementById("adminEmpChipRow");
+  const savedChipScrollLeft = oldChipRow ? oldChipRow.scrollLeft : 0;
+
   // Employee chips
   const empChips = `
     <button class="month-chip ${!sel?'active':''}" onclick="selectAdminEmp('')">👥 ทั้งหมด</button>
@@ -1624,7 +1628,7 @@ function renderAdminOverview() {
 
     ${carryCardHtml}
 
-    <div class="month-row" style="margin-bottom:12px">${empChips}</div>
+    <div class="month-row" id="adminEmpChipRow" style="margin-bottom:12px">${empChips}</div>
 
     ${isMoneyAdmin ? `
       <div style="background:linear-gradient(135deg,rgba(0,185,0,.12),rgba(255,213,79,.08));border:1px solid rgba(0,185,0,.3);border-radius:12px;padding:12px 14px;margin-bottom:10px">
@@ -1670,6 +1674,12 @@ function renderAdminOverview() {
     const merged = [...recs, ...empLeaves];
     renderAdminHeatmap(sel, merged);
     renderAdminEmpList(sel, merged);
+  }
+
+  // ★ v1.36: คืน scroll position ของ chip row (กันเด้งซ้ายตอนเลือกชื่อท้ายๆ)
+  const newChipRow = document.getElementById("adminEmpChipRow");
+  if (newChipRow && savedChipScrollLeft > 0) {
+    newChipRow.scrollLeft = savedChipScrollLeft;
   }
 }
 

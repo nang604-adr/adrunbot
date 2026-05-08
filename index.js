@@ -1414,10 +1414,13 @@ async function ensureNightShiftHeader(sheets) {
 // ══════════════════════════════════════════════════════════════
 
 // helper: คำนวณ pay ที่ "ควรจะเป็น" สำหรับ record หนึ่งตัว ตามสูตรปัจจุบัน
-function expectedPay(rec, emp) {
+// ★ v1.36: รับ earlierDayHours = ชั่วโมงที่ใช้ไปแล้วใน day เดียวกัน (สำหรับ MAX_OT_PER_DAY cap)
+function expectedPay(rec, emp, earlierDayHours = 0) {
   if (!emp) return null;
   if (rec.otType === "วันธรรมดา") {
-    return Math.round((rec.hours || 0) * (emp.hourlyRate || 0) * WEEKDAY_MULTIPLIER);
+    const remainingPayable = Math.max(0, MAX_OT_PER_DAY - earlierDayHours);
+    const payableHours     = Math.min(rec.hours || 0, remainingPayable);
+    return Math.round(payableHours * (emp.hourlyRate || 0) * WEEKDAY_MULTIPLIER);
   }
   // วันหยุด/อาทิตย์/ตจว. — ใช้ flat rate
   if (rec.otType && rec.otType.includes("ต่างจังหวัด")) {
@@ -1428,7 +1431,50 @@ function expectedPay(rec, emp) {
   return Math.round(emp.holidayFlat || 0);
 }
 
-// ── GET /api/payroll/recalc-preview — ดู diff ก่อน apply ──
+// ★ v1.36: helper — คำนวณ updates ทุก record ที่ pending + apply MAX_OT_PER_DAY cap (per-day, by idx order)
+function computeRecalcUpdates(all, empMap) {
+  // Step 1: group วันธรรมดา records ตาม name|date เพื่อทำ cap
+  const byNameDate = {};
+  for (const r of all) {
+    if (r.paidAt) continue;
+    if (!r.name || !r.date) continue;
+    if (r.otType === "เงินเดือน") continue;
+    if (r.otType && r.otType.startsWith("ลา")) continue;  // ไม่นับ leave (อยู่อีก sheet ไม่ควรมาเจอ — เผื่อไว้)
+    if (r.otType !== "วันธรรมดา") continue;
+    const key = `${r.name}|${r.date}`;
+    (byNameDate[key] = byNameDate[key] || []).push(r);
+  }
+
+  const diffs = [];
+  // วันธรรมดา records — apply cap ต่อวัน เรียงตาม idx (ลำดับ submission)
+  for (const group of Object.values(byNameDate)) {
+    group.sort((a, b) => a.idx - b.idx);
+    const emp = empMap[group[0].name];
+    if (!emp) continue;
+    let cumulativeHours = 0;
+    for (const r of group) {
+      const newPay = expectedPay(r, emp, cumulativeHours);
+      cumulativeHours += (r.hours || 0);  // ใช้ hours จริง — ไม่ใช่ payable
+      if (newPay !== null && newPay !== r.pay) diffs.push({ rec: r, newPay });
+    }
+  }
+
+  // Non-วันธรรมดา records (วันหยุด/ตจว.) — ใช้ flat rate, ไม่ต้อง cap
+  for (const r of all) {
+    if (r.paidAt) continue;
+    if (!r.name || !r.date) continue;
+    if (r.otType === "เงินเดือน") continue;
+    if (r.otType && r.otType.startsWith("ลา")) continue;
+    if (r.otType === "วันธรรมดา") continue;
+    const emp = empMap[r.name];
+    if (!emp) continue;
+    const newPay = expectedPay(r, emp);
+    if (newPay !== null && newPay !== r.pay) diffs.push({ rec: r, newPay });
+  }
+  return diffs;
+}
+
+// ── GET /api/payroll/recalc-preview — ดู diff ก่อน apply (★ v1.36: รวม MAX_OT cap) ──
 app.get("/api/payroll/recalc-preview", requireAdmin, async (req, res) => {
   try {
     const sheets    = await getSheetsClient();
@@ -1436,35 +1482,18 @@ app.get("/api/payroll/recalc-preview", requireAdmin, async (req, res) => {
     const employees = await getEmployees(sheets);
     const empMap    = Object.fromEntries(employees.map(e => [e.name, e]));
 
-    const diffs = [];
-    for (const r of all) {
-      if (r.paidAt) continue;             // ข้าม records ที่จ่ายแล้ว
-      if (!r.name)  continue;
-      if (r.otType === "เงินเดือน") continue; // ข้าม salary auto records
-      const emp = empMap[r.name];
-      if (!emp) continue;
-      const newPay = expectedPay(r, emp);
-      if (newPay === null) continue;
-      if (newPay !== r.pay) {
-        diffs.push({
-          idx: r.idx,
-          row: idxToRow(r.idx),
-          name: r.name,
-          date: r.date,
-          startTime: r.startTime,
-          endTime: r.endTime,
-          hours: r.hours,
-          otType: r.otType,
-          oldPay: r.pay,
-          newPay,
-          diff: newPay - r.pay,
-        });
-      }
-    }
+    const diffs = computeRecalcUpdates(all, empMap).map(d => ({
+      idx: d.rec.idx, row: idxToRow(d.rec.idx),
+      name: d.rec.name, date: d.rec.date,
+      startTime: d.rec.startTime, endTime: d.rec.endTime,
+      hours: d.rec.hours, otType: d.rec.otType,
+      oldPay: d.rec.pay, newPay: d.newPay,
+      diff: d.newPay - d.rec.pay,
+    }));
 
     res.json({
       ok: true,
-      formula: { weekdayMultiplier: WEEKDAY_MULTIPLIER },
+      formula: { weekdayMultiplier: WEEKDAY_MULTIPLIER, maxOtPerDay: MAX_OT_PER_DAY },
       count: diffs.length,
       totalOldPay: diffs.reduce((s, d) => s + d.oldPay, 0),
       totalNewPay: diffs.reduce((s, d) => s + d.newPay, 0),
@@ -1476,7 +1505,7 @@ app.get("/api/payroll/recalc-preview", requireAdmin, async (req, res) => {
   }
 });
 
-// ── POST /api/payroll/recalc-apply — ลงมือแก้ pay ในชีต ──
+// ── POST /api/payroll/recalc-apply — ลงมือแก้ pay ในชีต (★ v1.36: รวม MAX_OT cap) ──
 app.post("/api/payroll/recalc-apply", requireAdmin, async (req, res) => {
   try {
     const sheets    = await getSheetsClient();
@@ -1484,29 +1513,15 @@ app.post("/api/payroll/recalc-apply", requireAdmin, async (req, res) => {
     const employees = await getEmployees(sheets);
     const empMap    = Object.fromEntries(employees.map(e => [e.name, e]));
 
-    const updates = [];
-    const applied = [];
-    for (const r of all) {
-      if (r.paidAt) continue;
-      if (!r.name)  continue;
-      if (r.otType === "เงินเดือน") continue;
-      const emp = empMap[r.name];
-      if (!emp) continue;
-      const newPay = expectedPay(r, emp);
-      if (newPay === null) continue;
-      if (newPay !== r.pay) {
-        const row = idxToRow(r.idx);
-        updates.push({
-          range: `OT_Records!I${row}`,    // col I = pay
-          values: [[newPay]],
-        });
-        applied.push({ name: r.name, date: r.date, oldPay: r.pay, newPay, row });
-      }
-    }
-
-    if (updates.length === 0) {
+    const diffs = computeRecalcUpdates(all, empMap);
+    if (diffs.length === 0) {
       return res.json({ ok: true, count: 0, message: "ไม่มี records ที่ต้องแก้" });
     }
+
+    const updates = diffs.map(d => ({
+      range: `OT_Records!I${idxToRow(d.rec.idx)}`,
+      values: [[d.newPay]],
+    }));
 
     // batch update เป็น chunk ละ 100 row กัน timeout
     for (let i = 0; i < updates.length; i += 100) {
@@ -1517,6 +1532,9 @@ app.post("/api/payroll/recalc-apply", requireAdmin, async (req, res) => {
       });
     }
 
+    const applied = diffs.map(d => ({
+      name: d.rec.name, date: d.rec.date, oldPay: d.rec.pay, newPay: d.newPay,
+    }));
     console.log(`🔧 Recalc applied: ${applied.length} records updated`);
     res.json({
       ok: true,
