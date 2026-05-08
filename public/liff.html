@@ -1511,11 +1511,49 @@ function renderAdminOverview() {
     const bizN   = adminLeaves.filter(l => l.otType === "ลากิจ").length;
     const vacN   = adminLeaves.filter(l => l.otType === "ลาพักร้อน").length;
     const peopleOnLeave = new Set(adminLeaves.map(l => l.name)).size;
+
+    // ★ v1.36: ปฏิทินลางานรวมทุกคน (ในมุมมอง "ทั้งหมด")
+    const leavesByDay = {};
+    adminLeaves.forEach(l => {
+      const day = Number((l.date||"").split("/")[0]);
+      if (!day) return;
+      (leavesByDay[day] = leavesByDay[day] || []).push(l);
+    });
+    const yearG = adminY - 543;
+    const monthIdx = adminM - 1;
+    const firstDowL = new Date(yearG, monthIdx, 1).getDay();
+    const daysInL = new Date(yearG, monthIdx + 1, 0).getDate();
+    let leaveCalHtml = '<div class="heatmap-grid">';
+    DAYS_TH.forEach((dn,i) => {
+      leaveCalHtml += `<div class="heatmap-hdr ${i===0?'sun':i===6?'sat':''}">${dn}</div>`;
+    });
+    for (let i=0; i<firstDowL; i++) leaveCalHtml += '<div></div>';
+    for (let d=1; d<=daysInL; d++) {
+      const lvs = leavesByDay[d] || [];
+      const dow = new Date(yearG, monthIdx, d).getDay();
+      let cls = "heatmap-day";
+      if (dow === 0) cls += " is-sun";
+      if (dow === 6) cls += " is-sat";
+      let extra = "";
+      let titleAttr = "";
+      if (lvs.length > 0) {
+        cls += " leave-d";
+        const titleTxt = lvs.map(l => {
+          const icon = l.otType === "ลาป่วย" ? "🤒" : l.otType === "ลากิจ" ? "📋" : "🏖️";
+          return `${icon} ${l.name}: ${l.otType}${l.task && l.task !== "-" ? " — " + l.task : ""}`;
+        }).join("\n");
+        titleAttr = `title="${esc(titleTxt).replace(/"/g, "&quot;")}"`;
+        extra = `<span class="leave-pill">${lvs.length}</span>`;
+      }
+      leaveCalHtml += `<div class="${cls}" ${titleAttr}><span class="heatmap-day-num">${d}</span>${extra}</div>`;
+    }
+    leaveCalHtml += '</div>';
+
     const leaveSummaryHtml = totLeave === 0 ? "" : `
       <div class="card" style="border:1px solid rgba(239,83,80,.3);background:rgba(239,83,80,.04);margin-bottom:10px">
         <div class="card-header" style="color:#ef9a9a">🏖️ การลา ${monthLabel} <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">${peopleOnLeave} คน · ${totLeave} วัน</span></div>
         <div class="card-body" style="padding-top:8px">
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px">
             <div style="background:rgba(255,255,255,.04);padding:8px;border-radius:8px;text-align:center">
               <div style="font-size:18px;font-weight:800;color:#ef9a9a">${sickN}</div>
               <div style="font-size:10px;color:var(--sub)">🤒 ลาป่วย</div>
@@ -1529,6 +1567,8 @@ function renderAdminOverview() {
               <div style="font-size:10px;color:var(--sub)">🏖️ พักร้อน</div>
             </div>
           </div>
+          <div style="font-size:10px;color:var(--sub);margin-bottom:6px">📅 ปฏิทินรวม — แตะวันที่มี <span class="leave-pill" style="width:14px;height:14px;font-size:8px;display:inline-flex;vertical-align:middle"></span> เพื่อดูชื่อ</div>
+          ${leaveCalHtml}
         </div>
       </div>`;
 
