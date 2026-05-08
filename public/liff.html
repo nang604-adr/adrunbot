@@ -1535,17 +1535,13 @@ function renderAdminOverview() {
       if (dow === 0) cls += " is-sun";
       if (dow === 6) cls += " is-sat";
       let extra = "";
-      let titleAttr = "";
+      let clickAttr = "";
       if (lvs.length > 0) {
         cls += " leave-d";
-        const titleTxt = lvs.map(l => {
-          const icon = l.otType === "ลาป่วย" ? "🤒" : l.otType === "ลากิจ" ? "📋" : "🏖️";
-          return `${icon} ${l.name}: ${l.otType}${l.task && l.task !== "-" ? " — " + l.task : ""}`;
-        }).join("\n");
-        titleAttr = `title="${esc(titleTxt).replace(/"/g, "&quot;")}"`;
+        clickAttr = `onclick="showLeaveDetail(${d})" style="cursor:pointer"`;
         extra = `<span class="leave-pill">${lvs.length}</span>`;
       }
-      leaveCalHtml += `<div class="${cls}" ${titleAttr}><span class="heatmap-day-num">${d}</span>${extra}</div>`;
+      leaveCalHtml += `<div class="${cls}" ${clickAttr}><span class="heatmap-day-num">${d}</span>${extra}</div>`;
     }
     leaveCalHtml += '</div>';
 
@@ -1567,7 +1563,7 @@ function renderAdminOverview() {
               <div style="font-size:10px;color:var(--sub)">🏖️ พักร้อน</div>
             </div>
           </div>
-          <div style="font-size:10px;color:var(--sub);margin-bottom:6px">📅 ปฏิทินรวม — แตะวันที่มี <span class="leave-pill" style="width:14px;height:14px;font-size:8px;display:inline-flex;vertical-align:middle"></span> เพื่อดูชื่อ</div>
+          <div style="font-size:10px;color:var(--sub);margin-bottom:6px">📅 ปฏิทินรวม — กดวันที่มี <span class="leave-pill" style="width:14px;height:14px;font-size:8px;display:inline-flex;vertical-align:middle"></span> เพื่อดูรายชื่อ</div>
           ${leaveCalHtml}
         </div>
       </div>`;
@@ -1846,6 +1842,45 @@ function renderAdminEmpList(name, records) {
       </div>`;
   }).join("");
   document.getElementById("adminEmpList").innerHTML = html;
+}
+
+// ★ v1.36: แสดงรายละเอียดวันลา (สำหรับปฏิทินรวมในมุมมองทั้งหมด)
+function showLeaveDetail(day) {
+  const dd = String(day).padStart(2, "0");
+  const dateStr = `${dd}/${STATE.adminMonth}/${STATE.adminYear}`;
+  const lvs = adminLeaves.filter(l => l.date === dateStr);
+  if (lvs.length === 0) return;
+
+  const dow = new Date(Number(STATE.adminYear)-543, Number(STATE.adminMonth)-1, day).getDay();
+  const dayLabel = `${dd}/${STATE.adminMonth}/${STATE.adminYear} (วัน${DAYS_FULL[dow]})`;
+
+  const isAdmin = STATE.role === "admin";
+  const items = lvs.map(l => {
+    const icon = l.otType === "ลาป่วย" ? "🤒" : l.otType === "ลากิจ" ? "📋" : "🏖️";
+    const color = l.otType === "ลาป่วย" ? "#ef9a9a" : l.otType === "ลากิจ" ? "#ffb74d" : "#90caf9";
+    const reason = l.task && l.task !== "-" ? l.task : "(ไม่ระบุเหตุผล)";
+    const escName = (l.name || "").replace(/'/g, "\\'");
+    const delBtn = isAdmin
+      ? `<button class="btn btn-grey btn-sm" onclick="adminDeleteLeave(${l._leaveIdx},'${escName}','${l.date}','${l.otType}');closeModal();" title="ลบ" style="padding:4px 8px;color:#ef9a9a;flex-shrink:0">🗑️</button>`
+      : "";
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--border);background:rgba(239,83,80,.04)">
+        <div style="font-size:22px;flex-shrink:0">${icon}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:14px;font-weight:700">${esc(l.name)}</div>
+          <div style="font-size:11px;color:${color};font-weight:600">${l.otType}</div>
+          <div style="font-size:11px;color:var(--sub);margin-top:2px">📝 ${esc(reason)}</div>
+        </div>
+        ${delBtn}
+      </div>`;
+  }).join("");
+
+  openModal(`🏖️ การลา ${dayLabel}`, `
+    <div style="font-size:11px;color:var(--sub);margin-bottom:8px">${lvs.length} คนลา</div>
+    <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">${items}</div>
+    <div style="height:12px"></div>
+    <button class="btn btn-grey btn-sm" style="width:100%" onclick="closeModal()">ปิด</button>
+  `);
 }
 
 // ★ v1.35 Phase 3: Admin ลบ leave record
