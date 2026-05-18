@@ -436,6 +436,7 @@ app.get("/api/me", async (req, res) => {
       role,                       // ★ v1.32: "admin" | "supervisor" | "employee"
       hourlyRate:  emp?.hourlyRate  || 0,
       holidayFlat: emp?.holidayFlat || 0,
+      satHalfDay:  emp?.satHalfDay  || false,  // ★ v1.36: ส่งให้ frontend เช็คเสาร์ครึ่งวัน
       matchedBy,
       verified,  // ★ ให้ client เช็คได้ว่า ID token verify ผ่านไหม
     });
