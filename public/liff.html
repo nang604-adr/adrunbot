@@ -597,11 +597,25 @@ const WEEKDAY_MULT = 1;  // ★ v1.34: hourlyRate คืออัตรา OT �
 // ★ v1.3+v1.4: เวลางานปกติ จันทร์–เสาร์ 08:30–17:30 (ห้ามลง OT ทับ) + รองรับข้ามวัน
 const WORK_START_MIN = 8 * 60 + 30;   // 510
 const WORK_END_MIN   = 17 * 60 + 30;  // 1050
+const WORK_END_MIN_SAT_HALF = 12 * 60; // 720 (เสาร์ครึ่งวัน)
+
+// ★ v1.36: คืน work end ตาม satHalfDay + วันที่เลือก (sync กับ backend getWorkEndForEmp)
+function getWorkEndMinForSelDate() {
+  if (STATE.selDow === 6 && STATE.empData?.satHalfDay) return WORK_END_MIN_SAT_HALF;
+  return WORK_END_MIN;
+}
+function workWindowLabelClient() {
+  const we = getWorkEndMinForSelDate();
+  const eh = Math.floor(we / 60), em = we % 60;
+  return `08:30–${String(eh).padStart(2,"0")}:${String(em).padStart(2,"0")}`;
+}
+
 function overlapsWorkHours(sh, sm, eh, em) {
   let s = sh * 60 + sm, e = eh * 60 + em;
   if (e < s) e += 24 * 60; // ข้ามวัน
-  const day1 = s < WORK_END_MIN          && e > WORK_START_MIN;
-  const day2 = s < WORK_END_MIN + 1440   && e > WORK_START_MIN + 1440;
+  const workEnd = getWorkEndMinForSelDate();  // ★ v1.36: ใช้ค่าตาม satHalfDay
+  const day1 = s < workEnd          && e > WORK_START_MIN;
+  const day2 = s < workEnd + 1440   && e > WORK_START_MIN + 1440;
   return day1 || day2;
 }
 
@@ -1072,7 +1086,7 @@ async function submitOT() {
 
   // validate ทับเวลางานปกติ — เฉพาะกรณี OT ปกติ (ไม่ใช่หยุด/ตจว.)
   if (!isHol && !isOutProvince && overlapsWorkHours(STATE.startH, STATE.startM, STATE.endH, STATE.endM)) {
-    return showErr(errBox, "ช่วง 08:30–17:30 เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้");
+    return showErr(errBox, `ช่วง ${workWindowLabelClient()} เป็นเวลางานปกติ ไม่สามารถบันทึก OT ได้`);
   }
 
   // ★ v1.36 Phase 2: ถ้า shift selector visible → ต้องเลือก
