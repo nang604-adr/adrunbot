@@ -3708,21 +3708,23 @@ function renderSupervisor() {
   }
 
   const html = pendingPayrolls.map(p => {
+    // ★ v1.36 fix: หัวหน้างาน → ซ่อนยอดเงินทุกที่ (แสดงแค่ ชม./วัน เพื่ออนุมัติได้)
     const summaryHtml = p.summary.map(s => {
-      const net = s.pay + s.travel - s.social;
       return `
         <div style="padding:6px 10px;border-bottom:1px solid var(--border);font-size:11px;display:flex;justify-content:space-between">
           <div>
             <b>${esc(s.name)}</b>
-            <span style="color:var(--sub);font-size:10px"> · ${s.days} วัน · ${s.hours} ชม. · หยุด/ตจว. ${s.holidays}</span>
           </div>
-          <div style="text-align:right">
-            <span style="color:#81c784;font-weight:700">${net.toLocaleString()}฿</span>
-            ${(s.travel || s.social) ? `<div style="font-size:8px;color:var(--sub)">OT ${s.pay.toLocaleString()}${s.travel?` +${s.travel}`:""}${s.social?` -${s.social}`:""}</div>` : ""}
+          <div style="text-align:right;color:var(--sub);font-size:10px">
+            ${s.days} วัน · ${s.hours} ชม. · หยุด/ตจว. ${s.holidays}
           </div>
         </div>
       `;
     }).join("");
+
+    // รวมชั่วโมงทั้งหมดในรอบ (สำหรับ top stat แทนยอดเงิน)
+    const totalHours = p.summary.reduce((sum, s) => sum + (s.hours || 0), 0);
+    const totalHolidays = p.summary.reduce((sum, s) => sum + (s.holidays || 0), 0);
 
     // ★ v1.32 dual: progress chips
     const approvers = p.approvers || [];
@@ -3744,18 +3746,22 @@ function renderSupervisor() {
           <span style="font-size:9px;color:var(--sub)">${p.payId}</span>
         </div>
         <div class="card-body">
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px;margin-bottom:12px">
             <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
-              <div style="font-size:18px;font-weight:800;color:#81c784">${p.records}</div>
+              <div style="font-size:16px;font-weight:800;color:#81c784">${p.records}</div>
               <div style="font-size:9px;color:var(--sub)">รายการ</div>
             </div>
             <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
-              <div style="font-size:18px;font-weight:800;color:#9fa8da">${p.employees}</div>
+              <div style="font-size:16px;font-weight:800;color:#9fa8da">${p.employees}</div>
               <div style="font-size:9px;color:var(--sub)">พนักงาน</div>
             </div>
             <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
-              <div style="font-size:18px;font-weight:800;color:#ffd54f">${p.totalPay.toLocaleString()}</div>
-              <div style="font-size:9px;color:var(--sub)">บาท</div>
+              <div style="font-size:16px;font-weight:800;color:#ffd54f">${(+totalHours.toFixed(1))}</div>
+              <div style="font-size:9px;color:var(--sub)">ชม.</div>
+            </div>
+            <div style="text-align:center;background:#141829;border-radius:10px;padding:8px">
+              <div style="font-size:16px;font-weight:800;color:#ef9a9a">${totalHolidays}</div>
+              <div style="font-size:9px;color:var(--sub)">วันหยุด</div>
             </div>
           </div>
           <div style="font-size:10px;color:var(--sub);margin-bottom:6px">ส่งโดย ${esc(p.createdBy)} · ${p.createdAt}</div>
