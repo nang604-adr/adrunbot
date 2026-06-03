@@ -18,6 +18,7 @@ const path       = require("path");
 const crypto     = require("crypto");
 // ★ v1.28: ใช้ xlsx-js-style (drop-in replacement ของ xlsx ที่รองรับ border + alignment)
 const XLSX       = require("xlsx-js-style");
+const cron       = require("node-cron");  // ★ v1.37
 
 // ★ v1.28: helper — ใส่ border + center alignment ให้ทุก cell ใน worksheet
 //   - แถวแรก (header): bg เขียว + text ขาว + bold
@@ -761,13 +762,7 @@ app.post("/api/leave", rateLimitByUser, async (req, res) => {
   if (!VALID_LEAVE_TYPES.has(leaveType)) {
     return res.status(400).json({ error: `leaveType ต้องเป็น: ${[...VALID_LEAVE_TYPES].join(" / ")}` });
   }
-  // เช็คลาย้อนหลัง
-  const [dd, mm, yyyy] = date.split("/").map(Number);
-  const leaveDate = new Date(yyyy - 543, mm - 1, dd); leaveDate.setHours(0,0,0,0);
-  const today = new Date(); today.setHours(0,0,0,0);
-  if (leaveDate < today) {
-    return res.status(400).json({ error: "ลาย้อนหลังไม่ได้ — เลือกวันที่ตั้งแต่วันนี้ขึ้นไป" });
-  }
+  // ★ v1.37: ลาย้อนหลังได้แล้ว (เดิม block ไว้ — ตอนนี้ปลดล็อก)
   try {
     const sheets = await getSheetsClient();
     const all = await getAllLeaves(sheets);
@@ -777,6 +772,22 @@ app.post("/api/leave", rateLimitByUser, async (req, res) => {
     }
     await saveLeave(sheets, { name, date, leaveType, reason: reason || "" });
     console.log(`📋 Leave: ${name} ${date} ${leaveType} — ${reason || "-"}`);
+
+    // ★ v1.37: แจ้งลงในกลุ่ม LINE (ถ้าตั้ง WORK_GROUP_ID ไว้)
+    if (process.env.WORK_GROUP_ID) {
+      const icon = leaveType === "ลาป่วย" ? "🤒" : leaveType === "ลากิจ" ? "📋" : "🏖️";
+      const [dd, mm, yyyy] = date.split("/").map(Number);
+      const dow = new Date(yyyy - 543, mm - 1, dd).getDay();
+      const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
+      const msg = `📋 บันทึกการลา\n👤 ${name}\n📅 ${date} (วัน${dayLabel})\n${icon} ${leaveType}\n📝 ${reason || "-"}`;
+      try {
+        await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+        console.log(`📤 Push leave notification to group`);
+      } catch (pushErr) {
+        console.error("Push to group failed:", pushErr.message);
+      }
+    }
+
     return res.json({ ok: true, name, date, leaveType, reason: reason || "" });
   } catch (e) {
     return res.status(500).json({ error: e.message });
@@ -2627,6 +2638,20 @@ async function handleBotEvent(event) {
   const text  = event.message.text.trim();
   const lower = text.toLowerCase();
 
+  // ★ v1.37: log groupId เสมอ (สำหรับ admin ตั้ง WORK_GROUP_ID env var)
+  if (event.source.groupId) {
+    console.log(`📍 Message from groupId: ${event.source.groupId}`);
+  }
+
+  // ★ v1.37: คำสั่ง #groupid — ตอบ Group ID (สำหรับตั้ง WORK_GROUP_ID env)
+  if (lower === "#groupid") {
+    const gid = event.source.groupId || "(ไม่ใช่กลุ่ม — เป็นแชท 1:1)";
+    return client.replyMessage(event.replyToken, {
+      type: "text",
+      text: `📍 Group ID:\n${gid}\n\nนำไปตั้ง env var WORK_GROUP_ID ใน Railway`,
+    });
+  }
+
   // ★ v1.34: คำสั่ง #คิว — ส่งลิงค์ระบบคิวงาน
   if (lower === "#คิว" || lower === "#queue") {
     return client.replyMessage(event.replyToken, {
@@ -2783,3 +2808,47 @@ async function buildSummary(sheets, name) {
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)`));
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.37: Cron job — แจ้งคนลาในกลุ่ม LINE ทุกวัน 9:00 น. (Asia/Bangkok)
+// ══════════════════════════════════════════════════════════════
+async function sendDailyLeaveBroadcast() {
+  if (!process.env.WORK_GROUP_ID) {
+    console.log("⏰ Daily leave broadcast — SKIP (WORK_GROUP_ID ไม่ได้ตั้ง)");
+    return;
+  }
+  try {
+    const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+    const dd = String(now.getDate()).padStart(2, "0");
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const yyyy = now.getFullYear() + 543;
+    const todayStr = `${dd}/${mm}/${yyyy}`;
+    const dow = now.getDay();
+    const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
+
+    const sheets = await getSheetsClient();
+    const all = await getAllLeaves(sheets);
+    const todayLeaves = all.filter(l => l.date === todayStr);
+
+    if (todayLeaves.length === 0) {
+      console.log(`⏰ Daily broadcast ${todayStr} — ไม่มีคนลา (skip)`);
+      return;
+    }
+
+    const lines = todayLeaves.map(l => {
+      const icon = l.leaveType === "ลาป่วย" ? "🤒" : l.leaveType === "ลากิจ" ? "📋" : "🏖️";
+      const reason = l.reason && l.reason !== "-" ? ` (${l.reason})` : "";
+      return `${icon} ${l.name} — ${l.leaveType}${reason}`;
+    }).join("\n");
+
+    const msg = `☀️ อรุณสวัสดิ์ — วันนี้ ${todayStr} (วัน${dayLabel})\nมีคนลา ${todayLeaves.length} คน:\n\n${lines}`;
+    await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    console.log(`📤 Daily broadcast sent: ${todayLeaves.length} leaves on ${todayStr}`);
+  } catch (e) {
+    console.error("Daily broadcast failed:", e.message);
+  }
+}
+
+// รัน 9:00 ทุกวัน (Asia/Bangkok)
+cron.schedule("0 9 * * *", sendDailyLeaveBroadcast, { timezone: "Asia/Bangkok" });
+console.log("⏰ Cron registered: daily leave broadcast at 09:00 Asia/Bangkok");

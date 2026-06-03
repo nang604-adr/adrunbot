@@ -411,7 +411,7 @@ textarea{resize:none;height:70px}
 
         <!-- Leave date picker -->
         <div class="card">
-          <div class="card-header">📅 วันที่ลา <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 ลาย้อนหลังไม่ได้</span></div>
+          <div class="card-header">📅 วันที่ลา <span style="font-weight:400;color:var(--sub);font-size:10px;margin-left:6px">💡 เลือกได้ทุกวัน (รวมย้อนหลัง)</span></div>
           <div class="card-body" style="padding-bottom:8px">
             <button class="date-btn" onclick="toggleLeaveCal()">
               <div class="date-val">
@@ -3016,18 +3016,17 @@ function leaveCalNext() {
 }
 
 function renderLeaveCal() {
+  // ★ v1.37: เอา restriction "ลาย้อนหลังไม่ได้" ออกแล้ว — เลือกวันไหนก็ได้
   const y = STATE.leaveCalYear, m = STATE.leaveCalMonth;
   document.getElementById("leaveCalTitle").textContent = `${MONTHS_SHORT[m]} ${y+543}`;
   const grid = document.getElementById("leaveCalGrid");
   const firstDow = new Date(y, m, 1).getDay();
   const days = new Date(y, m+1, 0).getDate();
-  const today = new Date(); today.setHours(0,0,0,0);
 
   let html = DAYS_TH.map((d,i)=>`<div class="cal-hdr ${i===0?'sun':i===6?'sat':''}">${d}</div>`).join("");
   for (let i=0;i<firstDow;i++) html += `<div></div>`;
   for (let d=1;d<=days;d++) {
     const dt = new Date(y, m, d); dt.setHours(0,0,0,0);
-    const isPast = dt.getTime() < today.getTime();
     const dd = String(d).padStart(2,"0");
     const mm2 = String(m+1).padStart(2,"0");
     const dateStr = `${dd}/${mm2}/${y+543}`;
@@ -3037,9 +3036,7 @@ function renderLeaveCal() {
     if (isSel)   cls += " selected";
     if (dow===0) cls += " sun-day";
     if (dow===6) cls += " sat-day";
-    if (isPast)  cls += " future"; // reuse opacity:.35 + cursor:not-allowed
-    const onclick = isPast ? "" : `onclick="pickLeaveDate('${dateStr}',${dow})"`;
-    html += `<div class="${cls}" ${onclick}><span class="cal-day-num">${d}</span></div>`;
+    html += `<div class="${cls}" onclick="pickLeaveDate('${dateStr}',${dow})"><span class="cal-day-num">${d}</span></div>`;
   }
   grid.innerHTML = html;
 }
