@@ -814,20 +814,64 @@ app.get("/api/leave", async (req, res) => {
   }
 });
 
-// ── DELETE /api/leave/:idx — admin ลบ leave record ──
-app.delete("/api/leave/:idx", requireAdmin, async (req, res) => {
+// ── DELETE /api/leave/:idx — admin หรือ owner ลบ leave (★ v1.38) ──
+//   - admin: ลบได้ทุกอัน ทุกวัน
+//   - owner: ลบได้เฉพาะของตัวเอง + วัน >= วันนี้ (อดีตยกเลิกไม่ได้)
+app.delete("/api/leave/:idx", async (req, res) => {
   const idx = Number(req.params.idx);
   if (!Number.isInteger(idx) || idx < 0) {
     return res.status(400).json({ error: "idx ไม่ถูกต้อง" });
   }
   try {
-    const sheets = await getSheetsClient();
+    const userId = (req.headers["x-line-user-id"] || "").toString().trim();
+    if (!userId) return res.status(401).json({ error: "ต้องส่ง x-line-user-id" });
+
+    const sheets    = await getSheetsClient();
+    const employees = await getEmployees(sheets);
+    const caller    = employees.find(e => e.userId === userId);
+    const admins    = getAdminIds();
+    const isAdmin   = admins.includes(userId) || caller?.role === "admin";
+
     const all = await getAllLeaves(sheets);
     const target = all.find(l => l.idx === idx);
     if (!target) return res.status(404).json({ error: `ไม่พบ leave idx=${idx}` });
-    // row จริง = idx + 3 (header rows 1-2 + 1-based)
+
+    // เช็คสิทธิ์
+    const isOwner = caller && target.name === caller.name;
+    if (!isAdmin && !isOwner) {
+      return res.status(403).json({ error: "ไม่มีสิทธิ์ลบ leave นี้" });
+    }
+
+    // owner ลบของเก่าไม่ได้ (admin ลบได้)
+    if (!isAdmin) {
+      const [dd, mm, yyyy] = target.date.split("/").map(Number);
+      const leaveDate = new Date(yyyy - 543, mm - 1, dd); leaveDate.setHours(0,0,0,0);
+      const today = new Date(); today.setHours(0,0,0,0);
+      if (leaveDate < today) {
+        return res.status(403).json({ error: "ยกเลิก leave ในอดีตไม่ได้ — ติดต่อ admin" });
+      }
+    }
+
+    // ลบ row จริง (idx + 3 — header rows 1-2 + 1-based)
     await deleteRow(sheets, "Leave_Records", idx + 3);
-    console.log(`🗑️  ลบ leave: ${target.name} ${target.date} ${target.leaveType}`);
+    console.log(`🗑️  ลบ leave: ${target.name} ${target.date} ${target.leaveType} (by ${caller?.name || userId}${isAdmin?",admin":""})`);
+
+    // ★ v1.38: push แจ้งกลุ่ม
+    if (process.env.WORK_GROUP_ID) {
+      const icon = target.leaveType === "ลาป่วย" ? "🤒" : target.leaveType === "ลากิจ" ? "📋" : "🏖️";
+      const [dd, mm, yyyy] = target.date.split("/").map(Number);
+      const dow = new Date(yyyy - 543, mm - 1, dd).getDay();
+      const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
+      const byNote = (isAdmin && !isOwner) ? `\n(ลบโดย admin: ${caller?.name || "Admin"})` : "";
+      const msg = `↩️ ยกเลิกการลา\n👤 ${target.name}\n📅 ${target.date} (วัน${dayLabel})\n${icon} ${target.leaveType}${byNote}`;
+      try {
+        await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+        console.log(`📤 Push cancel notification to group`);
+      } catch (pushErr) {
+        console.error("Push cancel failed:", pushErr.message);
+      }
+    }
+
     return res.json({ ok: true, idx, name: target.name, date: target.date, leaveType: target.leaveType });
   } catch (e) {
     return res.status(500).json({ error: e.message });

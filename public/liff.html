@@ -1223,6 +1223,14 @@ function renderMyOT(records) {
     return;
   }
 
+  // ★ v1.38: เช็คว่าวันที่ leave >= วันนี้ (สำหรับให้ยกเลิกได้)
+  const todayMs = (() => { const t = new Date(); t.setHours(0,0,0,0); return t.getTime(); })();
+  const canCancelLeave = (dateStr) => {
+    const [d, m, y] = dateStr.split("/").map(Number);
+    const dt = new Date(y - 543, m - 1, d); dt.setHours(0,0,0,0);
+    return dt.getTime() >= todayMs;
+  };
+
   const html = records.slice().reverse().map(r => {
     const [dd,mm,yy] = r.date.split("/");
     const dayShort = DAYS_TH[new Date(Number(yy)-543, Number(mm)-1, Number(dd)).getDay()] || "";
@@ -1234,6 +1242,12 @@ function renderMyOT(records) {
     const dateBoxStyle = isLeave ? `border:1px solid rgba(239,83,80,.3)` : (isWday ? "" : `border:1px solid rgba(255,213,79,.2)`);
     const ddColor = isLeave ? `color:#ef9a9a` : (isWday ? "" : `color:#ffd54f`);
     const leaveIcon = r.otType === "ลาป่วย" ? "🤒" : r.otType === "ลากิจ" ? "📋" : "🏖️";
+    // ★ v1.38: leave ปุ่ม — ยกเลิกได้ถ้าวัน >= วันนี้
+    const leaveBtn = isLeave
+      ? (canCancelLeave(r.date)
+          ? `<button class="btn btn-grey btn-sm" onclick="cancelMyLeave(${r._leaveIdx},'${r.date}','${r.otType}')" title="ยกเลิกการลา" style="padding:5px 8px;color:#ef9a9a">🗑️</button>`
+          : `<button class="btn btn-grey btn-sm" disabled title="ลาในอดีต — ยกเลิกไม่ได้" style="opacity:.4;cursor:not-allowed">🔒</button>`)
+      : "";
     return `
     <div class="ot-row" style="${rowBg}">
       <div style="display:flex;align-items:flex-start;gap:10px">
@@ -1253,7 +1267,7 @@ function renderMyOT(records) {
           ${r.task&&r.task!=="-"?`<div style="font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis">📝 ${esc(r.task)}${r.location?" · 📍"+r.location:""}</div>`:""}
         </div>
         ${isLeave
-          ? `<button class="btn btn-grey btn-sm" disabled title="ลางาน — แก้ไขไม่ได้" style="opacity:.4;cursor:not-allowed">🏖️</button>`
+          ? leaveBtn
           : (isPaid
               ? `<button class="btn btn-grey btn-sm" disabled title="จ่ายแล้ว แก้ไขไม่ได้" style="opacity:.4;cursor:not-allowed">🔒</button>`
               : `<button class="btn btn-grey btn-sm" onclick="openEditRequest(${r.idx},'${r.date}','${desc.replace(/'/g,"\\'")}')">🔧</button>`)}
@@ -1338,6 +1352,27 @@ function openEditRequest(idx, date, desc) {
     <div style="height:8px"></div>
     <button class="btn btn-grey" onclick="closeModal()">ยกเลิก</button>
   `);
+}
+
+// ★ v1.38: พนักงานยกเลิก leave ของตัวเอง (เฉพาะอนาคต/วันนี้)
+async function cancelMyLeave(leaveIdx, date, leaveType) {
+  const icon = leaveType === "ลาป่วย" ? "🤒" : leaveType === "ลากิจ" ? "📋" : "🏖️";
+  const ok = await confirmModal({
+    title: "ยกเลิกการลา?",
+    message: `${icon} ${leaveType}\n📅 ${date}\n\nบอทจะแจ้งในกลุ่มว่าคุณยกเลิก\nการกระทำนี้ย้อนกลับไม่ได้`,
+    okText: "🗑️ ยืนยันยกเลิก",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch(`/api/leave/${leaveIdx}`, { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok) return toast(data.error || "ยกเลิกไม่สำเร็จ", "err");
+    toast(`✅ ยกเลิกลา ${date} แล้ว`, "ok");
+    await loadMyOT();   // reload list
+  } catch (e) {
+    toast("เชื่อมต่อไม่ได้", "err");
+  }
 }
 
 async function submitEditRequest(idx, date, desc) {
