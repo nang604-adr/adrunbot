@@ -2893,6 +2893,6 @@ async function sendDailyLeaveBroadcast() {
   }
 }
 
-// รัน 9:00 ทุกวัน (Asia/Bangkok)
-cron.schedule("0 9 * * *", sendDailyLeaveBroadcast, { timezone: "Asia/Bangkok" });
-console.log("⏰ Cron registered: daily leave broadcast at 09:00 Asia/Bangkok");
+// รัน 8:30 ทุกวัน (Asia/Bangkok)
+cron.schedule("30 8 * * *", sendDailyLeaveBroadcast, { timezone: "Asia/Bangkok" });
+console.log("⏰ Cron registered: daily leave broadcast at 08:30 Asia/Bangkok");
