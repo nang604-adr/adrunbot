@@ -3101,6 +3101,11 @@ async function submitLeave() {
   const reason = (document.getElementById("leaveReason").value || "").trim();
   if (!reason) return showErr(errBox, "กรุณาระบุเหตุผลการลา");
 
+  // ★ v1.38.1: disable button ระหว่าง submit (กันกดซ้ำ)
+  const btn = document.querySelector("#modeLeave .btn-green");
+  const origText = btn?.textContent || "";
+  if (btn) { btn.disabled = true; btn.textContent = "กำลังบันทึก..."; }
+
   try {
     const res = await apiFetch("/api/leave", {
       method: "POST",
@@ -3120,6 +3125,8 @@ async function submitLeave() {
     document.getElementById("leaveReason").value = "";
   } catch (e) {
     showErr(errBox, "เชื่อมต่อไม่ได้");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
   }
 }
 // ════════════ /LEAVE FORM ════════════

@@ -763,32 +763,35 @@ app.post("/api/leave", rateLimitByUser, async (req, res) => {
     return res.status(400).json({ error: `leaveType ต้องเป็น: ${[...VALID_LEAVE_TYPES].join(" / ")}` });
   }
   // ★ v1.37: ลาย้อนหลังได้แล้ว (เดิม block ไว้ — ตอนนี้ปลดล็อก)
+  // ★ v1.38.1: ห่อ dup check + save ด้วย mutex (กัน race condition — 2 request พร้อมกัน)
   try {
-    const sheets = await getSheetsClient();
-    const all = await getAllLeaves(sheets);
-    const dup = all.find(l => l.name === name && l.date === date);
-    if (dup) {
-      return res.status(400).json({ error: `วันที่ ${date} คุณบันทึกลาไว้แล้ว (${dup.leaveType})` });
-    }
-    await saveLeave(sheets, { name, date, leaveType, reason: reason || "" });
-    console.log(`📋 Leave: ${name} ${date} ${leaveType} — ${reason || "-"}`);
-
-    // ★ v1.37: แจ้งลงในกลุ่ม LINE (ถ้าตั้ง WORK_GROUP_ID ไว้)
-    if (process.env.WORK_GROUP_ID) {
-      const icon = leaveType === "ลาป่วย" ? "🤒" : leaveType === "ลากิจ" ? "📋" : "🏖️";
-      const [dd, mm, yyyy] = date.split("/").map(Number);
-      const dow = new Date(yyyy - 543, mm - 1, dd).getDay();
-      const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
-      const msg = `📋 บันทึกการลา\n👤 ${name}\n📅 ${date} (วัน${dayLabel})\n${icon} ${leaveType}\n📝 ${reason || "-"}`;
-      try {
-        await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
-        console.log(`📤 Push leave notification to group`);
-      } catch (pushErr) {
-        console.error("Push to group failed:", pushErr.message);
+    return await withOTMutex(`leave|${name}|${date}`, async () => {
+      const sheets = await getSheetsClient();
+      const all = await getAllLeaves(sheets);
+      const dup = all.find(l => l.name === name && l.date === date);
+      if (dup) {
+        return res.status(400).json({ error: `วันที่ ${date} คุณบันทึกลาไว้แล้ว (${dup.leaveType})` });
       }
-    }
+      await saveLeave(sheets, { name, date, leaveType, reason: reason || "" });
+      console.log(`📋 Leave: ${name} ${date} ${leaveType} — ${reason || "-"}`);
 
-    return res.json({ ok: true, name, date, leaveType, reason: reason || "" });
+      // ★ v1.37: แจ้งลงในกลุ่ม LINE (ถ้าตั้ง WORK_GROUP_ID ไว้)
+      if (process.env.WORK_GROUP_ID) {
+        const icon = leaveType === "ลาป่วย" ? "🤒" : leaveType === "ลากิจ" ? "📋" : "🏖️";
+        const [dd, mm, yyyy] = date.split("/").map(Number);
+        const dow = new Date(yyyy - 543, mm - 1, dd).getDay();
+        const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
+        const msg = `📋 บันทึกการลา\n👤 ${name}\n📅 ${date} (วัน${dayLabel})\n${icon} ${leaveType}\n📝 ${reason || "-"}`;
+        try {
+          await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+          console.log(`📤 Push leave notification to group`);
+        } catch (pushErr) {
+          console.error("Push to group failed:", pushErr.message);
+        }
+      }
+
+      return res.json({ ok: true, name, date, leaveType, reason: reason || "" });
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
