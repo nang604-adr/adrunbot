@@ -2866,8 +2866,7 @@ app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)
 // ══════════════════════════════════════════════════════════════
 const REST_HOURS = Number(process.env.REST_HOURS) || 10;  // พักหลัง OT
 
-// ★ v1.39.1: คำนวณว่า OT 1 record ทำให้เข้าสายวันนี้ไหม + push แจ้งกลุ่ม (ยิงทันทีตอนบันทึก)
-//   ใช้เมื่อพนักงานลง OT ย้อนหลังหลัง 8:30 — จะได้ไม่ตกข่าว
+// ★ v1.39.1: คำนวณว่า OT 1 record ทำให้เข้าสายวันนี้ไหม
 function computeLateArrival(rec, now) {
   if (!rec.startTime || rec.startTime === "-" || !rec.endTime || rec.endTime === "-") return null;
   const parts = (rec.date || "").split("/").map(Number);
@@ -2886,28 +2885,70 @@ function computeLateArrival(rec, now) {
   const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
   if (expectedStart < today830 || expectedStart >= tomorrow) return null;
 
+  const startMinOfDay = expectedStart.getHours() * 60 + expectedStart.getMinutes();
   return {
     endTime: `${String(endAbs.getHours()).padStart(2,"0")}:${String(endAbs.getMinutes()).padStart(2,"0")}`,
     startTime: `${String(expectedStart.getHours()).padStart(2,"0")}:${String(expectedStart.getMinutes()).padStart(2,"0")}`,
-    pastWorkEnd: (expectedStart.getHours() * 60 + expectedStart.getMinutes()) > (17 * 60 + 30),
+    startMin: startMinOfDay,
+    pastWorkEnd: startMinOfDay > (17 * 60 + 30),
   };
 }
 
+// ★ v1.39.2: debounce + dedup — 1 ข้อความต่อคนต่อวัน ใช้ record ที่จบดึกสุด
+const latePushTimers   = new Map();  // name → timeoutId (debounce 5s)
+const pushedLateToday  = new Map();  // "name|YYYY-M-D" → pushed startMin (dedup ข้ามเวลา)
+
+function _lateDayKey(now) { return `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`; }
+
 async function pushLateIfNeeded(rec) {
-  if (!process.env.WORK_GROUP_ID) return;
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
-  const late = computeLateArrival(rec, now);
-  if (!late) return;
-  const line = late.pastWorkEnd
-    ? `👤 ${rec.name} — จบ OT ${late.endTime} → พักทั้งวัน · เริ่มได้ ${late.startTime}`
-    : `👤 ${rec.name} — จบ OT ${late.endTime} → เข้างาน ${late.startTime}`;
-  const msg = `🌙 แจ้งเตือน — เข้างานสาย (พัก ${REST_HOURS} ชม.)\n${line}`;
-  try {
-    await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
-    console.log(`📤 Push late-arrival to group: ${rec.name}`);
-  } catch (e) {
-    console.error("Push late-arrival failed:", e.message);
-  }
+  if (!process.env.WORK_GROUP_ID || !rec?.name) return;
+  const name = rec.name;
+
+  // debounce 5 วินาที — ถ้ามีการบันทึกซ้ำภายใน 5 วิ จะรวมเป็น 1 ข้อความ
+  if (latePushTimers.has(name)) clearTimeout(latePushTimers.get(name));
+
+  const timer = setTimeout(async () => {
+    latePushTimers.delete(name);
+    try {
+      const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+      const sheets = await getSheetsClient();
+      const all = await getAllRecords(sheets);
+
+      // scan records ทั้งหมดของคนนี้ → หา record ที่ทำให้เข้างานช้าที่สุดวันนี้
+      let latest = null;
+      for (const r of all) {
+        if (r.name !== name) continue;
+        const late = computeLateArrival(r, now);
+        if (!late) continue;
+        if (!latest || late.startMin > latest.startMin) latest = late;
+      }
+      if (!latest) return;
+
+      // dedup — ถ้า push ไปแล้วและ startMin ไม่ได้ช้ากว่าเดิม → skip
+      const key = `${name}|${_lateDayKey(now)}`;
+      const prev = pushedLateToday.get(key);
+      if (prev !== undefined && latest.startMin <= prev) {
+        console.log(`⏭️  Skip push late (ไม่ช้ากว่าเดิม): ${name} ${latest.startTime}`);
+        return;
+      }
+
+      const line = latest.pastWorkEnd
+        ? `👤 ${name} — จบ OT ${latest.endTime} → พักทั้งวัน · เริ่มได้ ${latest.startTime}`
+        : `👤 ${name} — จบ OT ${latest.endTime} → เข้างาน ${latest.startTime}`;
+      const header = prev !== undefined
+        ? `🌙 อัพเดท — เข้างานสาย (พัก ${REST_HOURS} ชม.)`
+        : `🌙 แจ้งเตือน — เข้างานสาย (พัก ${REST_HOURS} ชม.)`;
+      const msg = `${header}\n${line}`;
+
+      await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+      pushedLateToday.set(key, latest.startMin);
+      console.log(`📤 Push late-arrival: ${name} → ${latest.startTime}`);
+    } catch (e) {
+      console.error("Push late-arrival failed:", e.message);
+    }
+  }, 5000);
+
+  latePushTimers.set(name, timer);
 }
 
 // ★ v1.39: หา records OT ที่ทำให้เข้างานสายวันนี้
@@ -3007,6 +3048,11 @@ async function sendDailyLeaveBroadcast() {
     const msg = parts.join("\n");
     await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
     console.log(`📤 Daily broadcast sent: ${leaves.length} leaves, ${lateList.length} late`);
+    // ★ v1.39.2: เก็บ late ที่ประกาศแล้วลง dedup map — กันซ้ำกับ push ภายหลัง
+    const dayKey = _lateDayKey(now);
+    for (const l of lateList) {
+      pushedLateToday.set(`${l.name}|${dayKey}`, l.startMin);
+    }
   } catch (e) {
     console.error("Daily broadcast failed:", e.message);
   }
