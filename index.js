@@ -3110,6 +3110,25 @@ function isQueueAllName(name) {
   return QUEUE_ALL_NAMES.has((name || "").trim().toLowerCase());
 }
 
+// ★ v1.42.4: ชื่อเล่นไทยตั้งต้น (Neng จับคู่ให้ 22/11/2569) — รวมกับ Employees col K
+//   key = ชื่อ col A (ไม่สนตัวพิมพ์) · เพิ่ม/แก้ใน col K ได้ตามปกติ
+const QUEUE_ALIAS_DEFAULTS = {
+  "air":      ["แอร์"],
+  "aon":      ["อ้น", "อั้น"],
+  "scene":    ["ซีน"],
+  "tinn":     ["ติน", "ดิน"],
+  "touch":    ["ทัช"],
+  "dook":     ["ดุ๊ก", "ตุ๊ก"],
+  "ภาณุพงศ์": ["ดุ๊ก", "ตุ๊ก", "Dook"],
+  "teay":     ["เตย"],
+};
+function withDefaultAliases(employees) {
+  return employees.map(e => {
+    const extra = QUEUE_ALIAS_DEFAULTS[(e.name || "").toLowerCase()] || [];
+    return extra.length ? { ...e, aliasTh: [...new Set([...(e.aliasTh || []), ...extra])] } : e;
+  });
+}
+
 // ★ v1.42.3: normalize ชื่อเล่นไทย — ตัด ั ่ ้ ๊ ๋ ์ ็ + ช่องว่าง + lowercase
 function normThaiName(str) {
   return (str || "").toLowerCase().replace(/[\u0E31\u0E47-\u0E4C\s]/g, "");
@@ -3207,13 +3226,14 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
 
   try {
     const sheets = await getSheetsClient();
-    const [employees, queueResult, otRecords, leaveRecords, holidays] = await Promise.all([
+    const [employeesRaw, queueResult, otRecords, leaveRecords, holidays] = await Promise.all([
       getEmployees(sheets),
       getQueueRecordsForMonth(sheets, month, yearCE),
       getAllRecords(sheets),
       getAllLeaves(sheets),
       getHolidayList(sheets).catch(() => []),
     ]);
+    const employees = withDefaultAliases(employeesRaw);  // ★ v1.42.4
     const holidaySet = new Set(holidays.map(h => h.date));
     const skipSet = getQueueSkipSet();
     // ★ v1.41: "All" = พนักงานทุกคน ยกเว้น admin
