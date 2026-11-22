@@ -2857,11 +2857,62 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)`));
 
 // ══════════════════════════════════════════════════════════════
-// ★ v1.37: Cron job — แจ้งคนลาในกลุ่ม LINE ทุกวัน 9:00 น. (Asia/Bangkok)
+// ★ v1.37: Cron job — แจ้งคนลา + คนเข้าสาย (OT ดึก) ทุกเช้า 8:30 น.
+// ★ v1.39: เพิ่ม "late arrival" — OT จบดึก → พัก REST_HOURS → เข้างานสาย
 // ══════════════════════════════════════════════════════════════
+const REST_HOURS = Number(process.env.REST_HOURS) || 10;  // พักหลัง OT
+
+// ★ v1.39: หา records OT ที่ทำให้เข้างานสายวันนี้
+async function getLateArrivalsForToday(sheets, now) {
+  const today830 = new Date(now); today830.setHours(8, 30, 0, 0);
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
+  const toMin = t => { const [h, m] = (t || "").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+
+  const all = await getAllRecords(sheets);
+  const results = [];
+
+  for (const r of all) {
+    if (!r.name || !r.date) continue;
+    if (r.otType === "เงินเดือน") continue;
+    if (!r.startTime || r.startTime === "-" || !r.endTime || r.endTime === "-") continue;
+
+    const parts = r.date.split("/").map(Number);
+    if (parts.length !== 3) continue;
+    const [dd, mm, yyyy] = parts;
+    const baseDate = new Date(yyyy - 543, mm - 1, dd);
+
+    const startMin = toMin(r.startTime);
+    let endMin = toMin(r.endTime);
+    if (endMin < startMin) endMin += 1440;  // cross-midnight
+    if (r.nightShift)      endMin += 1440;  // night shift = next day
+
+    const endAbs = new Date(baseDate.getTime() + endMin * 60 * 1000);
+    const expectedStart = new Date(endAbs.getTime() + REST_HOURS * 60 * 60 * 1000);
+
+    // รวม: expectedStart ต้องเป็นวันนี้ + หลัง 08:30 เป๊ะ
+    if (expectedStart < today830) continue;
+    if (expectedStart >= tomorrow) continue;
+
+    results.push({
+      name: r.name,
+      endTime: `${String(endAbs.getHours()).padStart(2,"0")}:${String(endAbs.getMinutes()).padStart(2,"0")}`,
+      startTime: `${String(expectedStart.getHours()).padStart(2,"0")}:${String(expectedStart.getMinutes()).padStart(2,"0")}`,
+      startMin: expectedStart.getHours() * 60 + expectedStart.getMinutes(),
+      pastWorkEnd: (expectedStart.getHours() * 60 + expectedStart.getMinutes()) > (17 * 60 + 30),
+    });
+  }
+
+  // dedup ต่อคน — เก็บอันที่ เริ่มได้ช้าสุด (critical case)
+  const byName = {};
+  for (const l of results) {
+    if (!byName[l.name] || l.startMin > byName[l.name].startMin) byName[l.name] = l;
+  }
+  return Object.values(byName);
+}
+
 async function sendDailyLeaveBroadcast() {
   if (!process.env.WORK_GROUP_ID) {
-    console.log("⏰ Daily leave broadcast — SKIP (WORK_GROUP_ID ไม่ได้ตั้ง)");
+    console.log("⏰ Daily broadcast — SKIP (WORK_GROUP_ID ไม่ได้ตั้ง)");
     return;
   }
   try {
@@ -2874,23 +2925,40 @@ async function sendDailyLeaveBroadcast() {
     const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
 
     const sheets = await getSheetsClient();
-    const all = await getAllLeaves(sheets);
-    const todayLeaves = all.filter(l => l.date === todayStr);
+    const [leaves, lateList] = await Promise.all([
+      getAllLeaves(sheets).then(all => all.filter(l => l.date === todayStr)),
+      getLateArrivalsForToday(sheets, now),
+    ]);
 
-    if (todayLeaves.length === 0) {
-      console.log(`⏰ Daily broadcast ${todayStr} — ไม่มีคนลา (skip)`);
+    if (leaves.length === 0 && lateList.length === 0) {
+      console.log(`⏰ Daily broadcast ${todayStr} — ไม่มีคนลา/เข้าสาย (skip)`);
       return;
     }
 
-    const lines = todayLeaves.map(l => {
-      const icon = l.leaveType === "ลาป่วย" ? "🤒" : l.leaveType === "ลากิจ" ? "📋" : "🏖️";
-      const reason = l.reason && l.reason !== "-" ? ` (${l.reason})` : "";
-      return `${icon} ${l.name} — ${l.leaveType}${reason}`;
-    }).join("\n");
+    const parts = [`☀️ อรุณสวัสดิ์ — วันนี้ ${todayStr} (วัน${dayLabel})`];
 
-    const msg = `☀️ อรุณสวัสดิ์ — วันนี้ ${todayStr} (วัน${dayLabel})\nมีคนลา ${todayLeaves.length} คน:\n\n${lines}`;
+    if (leaves.length > 0) {
+      const leaveLines = leaves.map(l => {
+        const icon = l.leaveType === "ลาป่วย" ? "🤒" : l.leaveType === "ลากิจ" ? "📋" : "🏖️";
+        const reason = l.reason && l.reason !== "-" ? ` (${l.reason})` : "";
+        return `${icon} ${l.name} — ${l.leaveType}${reason}`;
+      }).join("\n");
+      parts.push(`\n🏖️ คนลา (${leaves.length} คน):\n${leaveLines}`);
+    }
+
+    if (lateList.length > 0) {
+      const lateLines = lateList.map(l => {
+        if (l.pastWorkEnd) {
+          return `👤 ${l.name} — จบ OT ${l.endTime} → พักทั้งวัน · เริ่มได้ ${l.startTime}`;
+        }
+        return `👤 ${l.name} — จบ OT ${l.endTime} → เข้างาน ${l.startTime}`;
+      }).join("\n");
+      parts.push(`\n🌙 เข้างานสาย — OT ดึก (พัก ${REST_HOURS} ชม., ${lateList.length} คน):\n${lateLines}`);
+    }
+
+    const msg = parts.join("\n");
     await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
-    console.log(`📤 Daily broadcast sent: ${todayLeaves.length} leaves on ${todayStr}`);
+    console.log(`📤 Daily broadcast sent: ${leaves.length} leaves, ${lateList.length} late`);
   } catch (e) {
     console.error("Daily broadcast failed:", e.message);
   }
