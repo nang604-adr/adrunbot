@@ -488,11 +488,13 @@ textarea{resize:none;height:70px}
         <!-- ★ v1.32: ซ่อนสำหรับ supervisor -->
         <button class="sub-tab" onclick="showAdminSub('requests')" id="stab-requests">🔧 แก้ไข</button>
         <button class="sub-tab" onclick="showAdminSub('payroll')" id="stab-payroll">💰 จ่ายเงิน</button>
+        <button class="sub-tab" onclick="showAdminSub('queuecheck')" id="stab-queuecheck">🔍 ตรวจคิว</button>
       </div>
       <div id="admin-overview"></div>
       <div id="admin-chart" style="display:none"></div>
       <div id="admin-requests" style="display:none"></div>
       <div id="admin-payroll" style="display:none"></div>
+      <div id="admin-queuecheck" style="display:none"></div>
     </div>
 
     <!-- ══════════════════ SETTINGS TAB ══════════════════ -->
@@ -1406,7 +1408,8 @@ async function loadAdmin() {
   if (!isAdminUser) {
     document.getElementById("stab-requests").style.display = "none";
     document.getElementById("stab-payroll").style.display  = "none";
-    if (STATE.adminSub === "requests" || STATE.adminSub === "payroll") {
+    document.getElementById("stab-queuecheck").style.display = "none";  // ★ v1.41: admin only
+    if (STATE.adminSub === "requests" || STATE.adminSub === "payroll" || STATE.adminSub === "queuecheck") {
       STATE.adminSub = "overview";
     }
   }
@@ -1468,7 +1471,7 @@ function toggleAdminCarry() {
 
 function showAdminSub(sub) {
   STATE.adminSub = sub;
-  ["overview","chart","requests","payroll"].forEach(s => {
+  ["overview","chart","requests","payroll","queuecheck"].forEach(s => {
     document.getElementById(`admin-${s}`).style.display = s===sub?"block":"none";
     document.getElementById(`stab-${s}`).classList.toggle("active", s===sub);
   });
@@ -1476,7 +1479,163 @@ function showAdminSub(sub) {
   if (sub==="chart")    renderAdminChart();
   if (sub==="requests") renderAdminRequests();
   if (sub==="payroll")  renderAdminPayroll();
+  if (sub==="queuecheck") renderAdminQueueCheck();  // ★ v1.41
 }
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.41: 🔍 ตรวจคิว vs OT (admin only)
+//   ใช้เดือนเดียวกับ STATE.adminMonth/adminYear · กดเช็คเอง (ไม่ auto-fetch)
+// ══════════════════════════════════════════════════════════════
+const QC_STATUS = {
+  missing_ot:    { icon: "❌", label: "ไม่ลง OT",    color: "#ef9a9a", bg: "rgba(239,83,80,.15)" },
+  task_mismatch: { icon: "⚠️", label: "งานไม่ตรง",  color: "#ffb74d", bg: "rgba(255,167,38,.15)" },
+  extra_ot:      { icon: "➕", label: "ไม่มีในคิว",  color: "#90caf9", bg: "rgba(144,202,249,.15)" },
+  on_leave:      { icon: "🏖️", label: "ลา",         color: "#ce93d8", bg: "rgba(206,147,216,.15)" },
+  ok:            { icon: "✅", label: "ตรง",         color: "#81c784", bg: "rgba(0,185,0,.15)" },
+};
+const QC_DOW = ["อา","จ","อ","พ","พฤ","ศ","ส"];
+
+function qcKey() { return `${STATE.adminMonth}/${STATE.adminYear}`; }
+
+async function runQueueCheck() {
+  STATE.qcCache = STATE.qcCache || {};
+  const key = qcKey();
+  STATE.qcLoading = key;
+  renderAdminQueueCheck();
+  try {
+    const res = await apiFetch(`/api/admin/queue-check?month=${Number(STATE.adminMonth)}&year=${STATE.adminYear}`);
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || ("HTTP " + res.status));
+    STATE.qcCache[key] = data;
+  } catch (e) {
+    STATE.qcCache[key] = { error: e.message };
+  }
+  STATE.qcLoading = null;
+  renderAdminQueueCheck();
+}
+
+function setQcFilter(f) { STATE.qcFilter = f; renderAdminQueueCheck(); }
+function setQcName(n)   { STATE.qcName = n;   renderAdminQueueCheck(); }
+
+function renderAdminQueueCheck() {
+  const el = document.getElementById("admin-queuecheck");
+  if (!el) return;
+  STATE.qcCache  = STATE.qcCache || {};
+  STATE.qcFilter = STATE.qcFilter || "attention";   // default: เฉพาะที่ต้องดู
+  const key = qcKey();
+  const data = STATE.qcCache[key];
+  const loading = STATE.qcLoading === key;
+
+  const m = Number(STATE.adminMonth), y = Number(STATE.adminYear);
+  const monthLabel = new Date(y - 543, m - 1, 1).toLocaleDateString("th-TH", { month: "long", year: "numeric" });
+  const now = new Date();
+  const isCurrentMonth = m === now.getMonth() + 1 && y === now.getFullYear() + 543;
+
+  const navHtml = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;background:#141829;padding:8px;border-radius:10px;border:1px solid var(--border)">
+      <button class="btn btn-grey btn-sm" onclick="adminMonthNav(-1)" style="padding:5px 10px">◀</button>
+      <div style="flex:1;text-align:center;font-size:13px;font-weight:700">📅 ${monthLabel}</div>
+      <button class="btn btn-grey btn-sm" onclick="adminMonthNav(1)" style="padding:5px 10px;${isCurrentMonth?'opacity:.4':''}" ${isCurrentMonth?'disabled':''}>▶</button>
+    </div>
+    <button class="btn btn-green" onclick="runQueueCheck()" ${loading?'disabled style="opacity:.6"':''} style="margin-bottom:12px">
+      ${loading ? "⏳ กำลังเช็ค..." : (data && !data.error ? "🔄 เช็คใหม่" : "🔍 เช็คคิว vs OT เดือนนี้")}
+    </button>`;
+
+  if (!data || loading) {
+    el.innerHTML = navHtml + `<div style="text-align:center;color:var(--sub);font-size:12px;padding:20px">
+      ${loading ? "กำลังอ่านคิวงาน + OT + วันลา..." : "เทียบคิวงาน (work sheet) กับ OT ที่พนักงานลง<br>กดปุ่มด้านบนเพื่อเริ่ม"}</div>`;
+    return;
+  }
+  if (data.error) {
+    el.innerHTML = navHtml + `<div class="card"><div class="card-body" style="color:#ef9a9a;font-size:12px">❌ เช็คไม่สำเร็จ: ${esc(data.error)}</div></div>`;
+    return;
+  }
+
+  const s = data.summary || {};
+  const rows = data.rows || [];
+
+  // ── summary chips (กดเป็น filter ได้) ──
+  const chip = (f, text, n, color) => `
+    <button class="month-chip ${STATE.qcFilter===f?'active':''}" onclick="setQcFilter('${f}')" style="${color?`color:${color}`:''}">
+      ${text} <b>${n}</b></button>`;
+  const chipsHtml = `
+    <div class="month-row" style="margin-bottom:10px;flex-wrap:wrap;gap:6px">
+      ${chip("attention", "🎯 ต้องดู", (s.missing_ot||0) + (s.task_mismatch||0))}
+      ${chip("ok", "✅", s.ok||0, QC_STATUS.ok.color)}
+      ${chip("missing_ot", "❌", s.missing_ot||0, QC_STATUS.missing_ot.color)}
+      ${chip("task_mismatch", "⚠️", s.task_mismatch||0, QC_STATUS.task_mismatch.color)}
+      ${chip("extra_ot", "➕", s.extra_ot||0, QC_STATUS.extra_ot.color)}
+      ${chip("on_leave", "🏖️", s.on_leave||0, QC_STATUS.on_leave.color)}
+      ${chip("all", "ทั้งหมด", s.total||0)}
+    </div>`;
+
+  // ── warnings / unknown names / skipped ──
+  const warnHtml = (data.warnings || []).map(w =>
+    `<div style="background:rgba(239,83,80,.12);border:1px solid rgba(239,83,80,.3);border-radius:10px;padding:8px 10px;font-size:11px;color:#ef9a9a;margin-bottom:8px">⚠️ ${esc(w)}</div>`).join("");
+  const unk = data.unknownNames || [];
+  const unkHtml = unk.length ? `
+    <div style="background:rgba(255,167,38,.1);border:1px solid rgba(255,167,38,.3);border-radius:10px;padding:8px 10px;font-size:11px;margin-bottom:8px">
+      <div style="color:#ffb74d;font-weight:700;margin-bottom:4px">❓ ชื่อในคิวที่ยังจับคู่ไม่ได้ (${unk.length})</div>
+      <div style="color:var(--text);line-height:1.7">${unk.map(n => `<span style="background:var(--card2);padding:1px 7px;border-radius:8px;margin-right:4px;white-space:nowrap">${esc(n)}</span>`).join("")}</div>
+      <div style="color:var(--sub);margin-top:4px">→ เติมใน Employees คอลัมน์ K (aliasTh) คั่นด้วย , แล้วกดเช็คใหม่</div>
+    </div>` : "";
+  const skipHtml = (s.skipped || s.allQueue) ? `
+    <div style="font-size:10px;color:var(--sub);margin-bottom:8px">
+      ${s.skipped ? `⏭️ ข้าม ${s.skipped} ชื่อ (${(data.skippedNames||[]).map(esc).join(", ")})` : ""}
+      ${s.skipped && s.allQueue ? " · " : ""}
+      ${s.allQueue ? `👥 คิว "All" ${s.allQueue} รายการ → กระจายให้ทุกคน (ยกเว้น admin)` : ""}
+    </div>` : "";
+
+  // ── filter rows ──
+  let view = rows;
+  if (STATE.qcFilter === "attention") view = rows.filter(r => r.status === "missing_ot" || r.status === "task_mismatch");
+  else if (STATE.qcFilter !== "all")  view = rows.filter(r => r.status === STATE.qcFilter);
+  const names = [...new Set(rows.map(r => r.name))].sort((a, b) => a.localeCompare(b));
+  if (STATE.qcName && !names.includes(STATE.qcName)) STATE.qcName = "";
+  if (STATE.qcName) view = view.filter(r => r.name === STATE.qcName);
+
+  const nameSel = `
+    <select onchange="setQcName(this.value)" style="margin-bottom:10px;padding:7px 10px;font-size:12px">
+      <option value="">👥 ทุกคน</option>
+      ${names.map(n => `<option value="${esc(n)}" ${STATE.qcName===n?'selected':''}>${esc(n)}</option>`).join("")}
+    </select>`;
+
+  const rowHtml = r => {
+    const st = QC_STATUS[r.status] || { icon: "?", label: r.status, color: "var(--sub)", bg: "var(--card2)" };
+    const [dd, mm] = r.date.split("/");
+    const dayColor = r.isHoliday || r.dow === 0 ? "#ef9a9a" : r.dow === 6 ? "#90caf9" : "var(--sub)";
+    const queueTxt = (r.queue || []).map(q => `${esc(q.store || "-")}${q.time ? ` <span style="color:var(--sub)">${esc(q.time)}</span>` : ""}`).join("<br>") || `<span style="color:var(--sub)">—</span>`;
+    const otTxt = (r.ot || []).map(o => `${esc(o.task || "-")}<br><span style="color:var(--sub)">${esc(o.startTime||"")}–${esc(o.endTime||"")}${o.hours ? ` · ${o.hours} ชม.` : ""}</span>`).join("<br>")
+      || (r.leave ? `<span style="color:#ce93d8">ลา${esc(r.leave.type||"")}</span>` : `<span style="color:var(--sub)">—</span>`);
+    return `
+      <tr style="border-top:1px solid var(--border);vertical-align:top">
+        <td style="padding:7px 4px;white-space:nowrap">${dd}/${mm}<div style="font-size:9px;color:${dayColor}">${QC_DOW[r.dow] ?? ""}${r.isHoliday ? " 🎌" : ""}</div></td>
+        <td style="padding:7px 4px;${r.isUnknown ? 'color:#ffb74d' : ''}">${esc(r.name)}${r.isUnknown ? " ❓" : ""}${r.fromAll ? `<div style="font-size:9px;color:var(--sub)">👥 All</div>` : ""}</td>
+        <td style="padding:7px 4px">${queueTxt}</td>
+        <td style="padding:7px 4px">${otTxt}</td>
+        <td style="padding:7px 4px;white-space:nowrap">
+          <span class="badge" style="background:${st.bg};color:${st.color};font-weight:700">${st.icon} ${st.label}</span>
+          ${r.status === "task_mismatch" || r.status === "ok" ? `<div style="font-size:9px;color:var(--sub);margin-top:2px">${Math.round((r.matchScore||0)*100)}%</div>` : ""}
+        </td>
+      </tr>`;
+  };
+
+  const tableHtml = view.length ? `
+    <div class="card" style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px;min-width:460px">
+        <thead><tr style="color:var(--sub);text-align:left;font-size:10px">
+          <th style="padding:8px 4px">วันที่</th><th style="padding:8px 4px">ชื่อ</th>
+          <th style="padding:8px 4px">คิวงาน</th><th style="padding:8px 4px">OT</th><th style="padding:8px 4px">สถานะ</th>
+        </tr></thead>
+        <tbody>${view.map(rowHtml).join("")}</tbody>
+      </table>
+    </div>
+    <div style="font-size:10px;color:var(--sub);text-align:center">แสดง ${view.length} จาก ${rows.length} รายการ</div>`
+    : `<div style="text-align:center;color:var(--sub);font-size:12px;padding:20px">${rows.length ? "🎉 ไม่มีรายการในตัวกรองนี้" : "ไม่พบคิวงาน/OT ในเดือนนี้"}</div>`;
+
+  el.innerHTML = navHtml + warnHtml + chipsHtml + unkHtml + skipHtml + nameSel + tableHtml;
+}
+
 
 // ★ v1.11: Admin Overview with employee selector + heatmap
 function selectAdminEmp(name) {

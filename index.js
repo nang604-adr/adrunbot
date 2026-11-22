@@ -3088,6 +3088,28 @@ function splitThaiNames(str) {
   return (str || "").split(/[\s,，\n\/\\]+/).map(s => s.trim()).filter(Boolean);
 }
 
+// ★ v1.41: ชื่อพิเศษในคิว
+//   - Sub / "-" / subcontractor → skip (ไม่ใช่พนักงาน ไม่ต้องเตือน)
+//   - All / ทุกคน → expand เป็นพนักงานทุกคน (ยกเว้น role=admin)
+//   เพิ่มชื่อ skip ได้ผ่าน env QUEUE_SKIP_NAMES="ชื่อ1,ชื่อ2"
+const QUEUE_SKIP_BASE = ["sub", "-", "–", "—", "ซับ", "subcon", "sub-con", "subcontractor", "outsource"];
+const QUEUE_ALL_NAMES = new Set(["all", "ทุกคน", "ทั้งหมด"]);
+function getQueueSkipSet() {
+  const extra = (process.env.QUEUE_SKIP_NAMES || "").split(/[,，]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+  return new Set([...QUEUE_SKIP_BASE, ...extra]);
+}
+function isQueueSkipName(name, skipSet) {
+  const n = (name || "").trim().toLowerCase();
+  if (!n) return true;
+  if (skipSet.has(n)) return true;
+  if (/^[-–—_.]+$/.test(n)) return true;          // "-", "--", "..."
+  if (/^sub[\d\-_(.]/.test(n)) return true;        // Sub1, sub-ไฟ, sub(ช่าง)
+  return false;
+}
+function isQueueAllName(name) {
+  return QUEUE_ALL_NAMES.has((name || "").trim().toLowerCase());
+}
+
 // match ชื่อไทย (จากคิวงาน) → employee object
 function matchEmployeeByThaiName(thaiName, employees) {
   const t = (thaiName || "").trim();
@@ -3172,12 +3194,17 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
 
   try {
     const sheets = await getSheetsClient();
-    const [employees, queueResult, otRecords, leaveRecords] = await Promise.all([
+    const [employees, queueResult, otRecords, leaveRecords, holidays] = await Promise.all([
       getEmployees(sheets),
       getQueueRecordsForMonth(sheets, month, yearCE),
       getAllRecords(sheets),
       getAllLeaves(sheets),
+      getHolidayList(sheets).catch(() => []),
     ]);
+    const holidaySet = new Set(holidays.map(h => h.date));
+    const skipSet = getQueueSkipSet();
+    // ★ v1.41: "All" = พนักงานทุกคน ยกเว้น admin
+    const allTargets = employees.filter(e => e.role !== "admin");
 
     const monthKey = `/${String(month).padStart(2,"0")}/${year}`;
     const otsThisMonth    = otRecords.filter(r => r.date && r.date.endsWith(monthKey));
@@ -3191,10 +3218,30 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
     };
 
     const unknownNames = new Set();
+    const skippedNames = new Set();
+    let skippedCount = 0, allQueueCount = 0;
     for (const q of queueResult.rows) {
-      const thais = splitThaiNames(q.thaiNames);
-      for (const t of thais) {
+      const thais = [...new Set(splitThaiNames(q.thaiNames))];  // กันชื่อซ้ำในแถวเดียว
+      const seenInRow = new Set();  // emp.name ที่ใส่แล้วในแถวนี้
+      // ชื่อที่ระบุตรงๆ ก่อน → แล้วค่อย expand All (กันซ้ำ)
+      const ordered = [...thais.filter(t => !isQueueAllName(t)), ...thais.filter(isQueueAllName)];
+      for (const t of ordered) {
+        if (isQueueSkipName(t, skipSet)) {
+          skippedCount++; skippedNames.add(t);
+          continue;
+        }
+        if (isQueueAllName(t)) {
+          allQueueCount++;
+          for (const emp of allTargets) {
+            if (seenInRow.has(emp.name)) continue;
+            seenInRow.add(emp.name);
+            getOrInit(`${emp.name}|${q.date}`).queue.push({ ...q, thaiName: t, matchedName: emp.name, fromAll: true });
+          }
+          continue;
+        }
         const emp = matchEmployeeByThaiName(t, employees);
+        if (emp && seenInRow.has(emp.name)) continue;
+        if (emp) seenInRow.add(emp.name);
         if (!emp) {
           unknownNames.add(t);
           const key = `__unknown__${t}|${q.date}`;
@@ -3232,7 +3279,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         continue; // ลาเฉยๆ ไม่มีคิว/OT → ไม่ต้องรายงาน
       } else if (queue.length > 0 && ot.length === 0) {
         status = "missing_ot";
-        note = "ลืมลง OT";
+        note = queue.every(q => q.fromAll) ? "คิว All — ไม่ได้ลง OT" : "ลืมลง OT";
       } else if (queue.length === 0 && ot.length > 0) {
         status = "extra_ot";
         note = "ไม่พบในคิวงาน";
@@ -3254,6 +3301,9 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         ot: ot.map(o => ({ task: o.task, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType })),
         leave: leave ? { type: leave.leaveType, reason: leave.reason } : null,
         status, note, matchScore,
+        fromAll: queue.length > 0 && queue.every(q => q.fromAll),  // ★ v1.41
+        dow: (() => { const [d, m, y] = date.split("/").map(Number); return new Date(y - 543, m - 1, d).getDay(); })(),
+        isHoliday: holidaySet.has(date),
       });
     }
 
@@ -3264,7 +3314,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       const [db, mb, yb] = b.date.split("/").map(Number);
       const dt = new Date(ya-543, ma-1, da) - new Date(yb-543, mb-1, db);
       if (dt !== 0) return dt;
-      const so = (statusOrder[a.status]||99) - (statusOrder[b.status]||99);
+      const so = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);  // ★ v1.41 fix: missing_ot=0 เคยกลายเป็น 99
       if (so !== 0) return so;
       return a.name.localeCompare(b.name);
     });
@@ -3276,6 +3326,8 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       extra_ot:      rows.filter(r => r.status === "extra_ot").length,
       task_mismatch: rows.filter(r => r.status === "task_mismatch").length,
       on_leave:      rows.filter(r => r.status === "on_leave").length,
+      skipped:       skippedCount,      // ★ v1.41: Sub / "-" ที่ข้าม
+      allQueue:      allQueueCount,     // ★ v1.41: จำนวนคิวที่เป็น All
     };
 
     res.json({
@@ -3283,6 +3335,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       month, year,
       summary,
       unknownNames: [...unknownNames],
+      skippedNames: [...skippedNames],
       warnings: queueResult.warning ? [queueResult.warning] : [],
       rows,
     });
