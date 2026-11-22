@@ -3162,22 +3162,142 @@ function matchEmployeeByThaiName(thaiName, employees) {
   return null;
 }
 
-// tokenize สำหรับ fuzzy task match
-function tokenizeTask(str) {
-  return (str || "")
-    .toLowerCase()
-    .replace(/[\d\(\)\[\]\{\}\-,\.\/\\\+\|\=\_\"']+/g, " ")
-    .split(/\s+/)
-    .filter(w => w.length >= 2);
+// ★ v1.43: ตัวเทียบชื่องาน คิว ↔ OT (ไทย/อังกฤษ + สะกดใกล้เคียง + ไทยเขียนติดกัน)
+//   score = น้ำหนักคำสำคัญในชื่อคิว ที่เจอในข้อความ OT / น้ำหนักทั้งหมด (0–1)
+//   - รหัสงาน (PZ1094, BK1212) ถ้าเจอใน OT = 1 ทันที
+//   - ชื่อแบรนด์ทั่วไป (central, ptt, shell ...) น้ำหนักครึ่งเดียว — กันจับคนละสาขา
+const TASK_MATCH_OK = 0.5;
+function normTaskText(str) {
+  return (str || "").toLowerCase()
+    .replace(/[\u0E31\u0E47-\u0E4C]/g, "")     // ตัด ั ็ ่ ้ ๊ ๋ ์
+    .replace(/[“”"'`’]/g, "");
 }
-
-function taskMatchScore(a, b) {
-  const sa = new Set(tokenizeTask(a));
-  const sb = new Set(tokenizeTask(b));
-  if (sa.size === 0 || sb.size === 0) return 0;
-  let common = 0;
-  for (const w of sa) if (sb.has(w)) common++;
-  return common / Math.min(sa.size, sb.size);
+// ไทย/ชื่อเรียก → token อังกฤษตัวเดียว (เขียน key ตามที่คนพิมพ์ได้ — normalize ให้อัตโนมัติ)
+const TASK_SYNONYMS_RAW = {
+  ctw:        ["central world", "centralworld", "เซ็นทรัลเวิลด์", "เซ็นทรัลเวิล", "เซนทรัลเวิลด์", "ctw"],
+  emquartier: ["emquartier", "em quartier", "เอ็มควอเทียร์", "เอ็มควอเทีย", "เอ็มควอร์เทียร์", "เอ็มควอเทียร"],
+  emporium:   ["emporium", "เอ็มโพเรียม"],
+  emsphere:   ["emsphere", "เอ็มสเฟียร์"],
+  shell:      ["shell", "เชลล์", "เชล"],
+  ptt:        ["ptt", "ปตท", "ป.ต.ท"],
+  bangchak:   ["bangchak", "บางจาก"],
+  westgate:   ["westgate", "west gate", "เวสต์เกต", "เวสเกต", "เวสต์เกท", "เวสเกท"],
+  central:    ["central", "เซ็นทรัล", "เซนทรัล"],
+  lotus:      ["lotus", "lotuss", "โลตัส"],
+  bigc:       ["big c", "bigc", "บิ๊กซี", "บิกซี"],
+  robinson:   ["robinson", "โรบินสัน"],
+  themall:    ["the mall", "themall", "เดอะมอลล์", "เดอะมอล"],
+  seacon:     ["seacon", "ซีคอน"],
+  fashionisland: ["fashion island", "แฟชั่นไอส์แลนด์", "แฟชั่นไอแลนด์"],
+  megabangna: ["mega bangna", "megabangna", "เมกาบางนา", "เมกา บางนา"],
+  iconsiam:   ["iconsiam", "icon siam", "ไอคอนสยาม"],
+  siamparagon:["siam paragon", "paragon", "สยามพารากอน", "พารากอน"],
+  terminal21: ["terminal 21", "terminal21", "เทอร์มินอล21", "เทอร์มินอล 21"],
+  burgerking: ["burger king", "burgerking", "เบอร์เกอร์คิง", "เบอเกอร์คิง"],
+  kfc:        ["kfc", "เคเอฟซี"],
+  mcdonalds:  ["mcdonald", "mcdonalds", "แมคโดนัลด์", "แมค"],
+  starbucks:  ["starbucks", "สตาร์บัคส์", "สตาบัค"],
+  samsung:    ["samsung", "ซัมซุง", "ซัมซุ"],
+  jdsport:    ["jd sport", "jd sports", "jdsport"],
+  ramintra:   ["ramintra", "รามอินทรา"],
+  pattaya:    ["pattaya", "พัทยา"],
+  salaya:     ["salaya", "ศาลายา"],
+  nakhonpathom: ["nakhon pathom", "นครปฐม"],
+  bangkae:    ["bangkae", "bang khae", "บางแค"],
+  ladprao:    ["ladprao", "lat phrao", "ลาดพร้าว"],
+  rama9:      ["rama 9", "rama9", "พระราม 9", "พระราม9"],
+  rama2:      ["rama 2", "rama2", "พระราม 2", "พระราม2"],
+  rama3:      ["rama 3", "rama3", "พระราม 3", "พระราม3"],
+  bangna:     ["bangna", "บางนา"],
+  pinklao:    ["pinklao", "ปิ่นเกล้า"],
+  chaengwattana: ["chaengwattana", "แจ้งวัฒนะ"],
+  ratchaburi: ["ratchaburi", "ราชบุรี"],
+};
+const BRAND_TOKENS = new Set(["central", "ptt", "shell", "bangchak", "lotus", "bigc", "robinson", "themall", "kfc", "mcdonalds", "starbucks", "burgerking", "samsung"]);
+const TASK_STOPWORDS = new Set([
+  "led", "lcd", "dt", "the", "and", "job", "hub", "wall", "screen", "tv",
+  ...["งาน","เข้า","ถอด","ติด","ติดตั้ง","ตั้ง","จอ","เสีย","ร้าน","ส่ง","เก็บ","ซ่อม","ปั๊ม","หน้า","สาขา","ไป","มา","เช่า","จอเช่า","ส่งจอ","ถอดจอ","ติดจอ","เก็บจอ","ซ่อมจอ","คุม","สแตนบาย","อัพหนัง","และ","กับ","ที่","ใหม่","เดิม","ทีม","ใต้","เหนือ"].map(normTaskText),
+]);
+// สร้าง list (ยาว→สั้น) เพื่อแทนที่คำยาวก่อน
+const TASK_SYN_LIST = Object.entries(TASK_SYNONYMS_RAW)
+  .flatMap(([canon, vs]) => vs.map(v => [normTaskText(v), canon]))
+  .sort((a, b) => b[0].length - a[0].length);
+function canonTaskText(str) {
+  let s = normTaskText(str);
+  for (const [v, canon] of TASK_SYN_LIST) {
+    if (!v) continue;
+    // ภาษาอังกฤษ: ต้องเป็นคำเต็ม · ภาษาไทย: substring
+    if (/^[a-z0-9 .]+$/.test(v)) {
+      const re = new RegExp(`(^|[^a-z0-9])${v.replace(/[.]/g, "\\.").replace(/ /g, "\\s*")}(?=$|[^a-z0-9])`, "g");
+      s = s.replace(re, `$1 ${canon} `);
+    } else {
+      s = s.split(v).join(` ${canon} `);
+    }
+  }
+  return s;
+}
+const isCodeToken = t => /^[a-z]{1,4}\d{3,}$/.test(t) || /^\d{4,}$/.test(t);   // PZ1094, BK1212, 76522
+function taskTokens(str) {
+  return canonTaskText(str)
+    .replace(/[()\[\]{}\-_,\/\\+|=:;!?#@*&]+/g, " ")
+    .split(/\s+/)
+    .map(t => t.replace(/^\.+|\.+$/g, ""))
+    .filter(t => t && !/^[\d.x"=]+$/.test(t))          // ตัดตัวเลข/ขนาดจอ เช่น 0.96x2.08, 55"=2
+    .filter(t => !TASK_STOPWORDS.has(t));
+}
+// edit distance ต่ำสุดของ needle กับ substring ใดๆ ใน hay (Sellers)
+function approxSubstrDist(needle, hay) {
+  const m = needle.length, n = hay.length;
+  if (!m) return 0;
+  let prev = new Array(n + 1).fill(0), cur = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const c = needle[i - 1] === hay[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j - 1] + c, prev[j] + 1, cur[j - 1] + 1);
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return Math.min(...prev);
+}
+function tokenFound(tok, otTokens, otJoined) {
+  const latin = /^[a-z0-9.]+$/.test(tok);
+  if (latin) {
+    if (otTokens.includes(tok)) return true;
+    if (tok.length >= 5) {   // สะกดเพี้ยน 1 ตัว (ยาว ≥5) / 2 ตัว (ยาว ≥9)
+      const maxD = tok.length >= 9 ? 2 : 1;
+      return otTokens.some(o => /^[a-z0-9.]+$/.test(o) && Math.abs(o.length - tok.length) <= maxD && approxSubstrDist(tok, o) <= maxD);
+    }
+    return false;
+  }
+  // ไทย: เขียนติดกันได้ → หา substring แบบยอมเพี้ยน
+  if (tok.length < 2) return false;
+  if (otJoined.includes(tok)) return true;
+  if (tok.length >= 4) return approxSubstrDist(tok, otJoined) <= (tok.length >= 8 ? 2 : 1);
+  return false;
+}
+function scoreAgainst(qText, otTokens, otJoined) {
+  const toks = [...new Set(taskTokens(qText))];
+  const codes = toks.filter(isCodeToken);
+  if (codes.some(c => otTokens.includes(c))) return 1;
+  const keys = toks.filter(t => !isCodeToken(t));
+  if (!keys.length) return 0;
+  let total = 0, hit = 0;
+  for (const t of keys) {
+    const w = BRAND_TOKENS.has(t) ? 0.5 : 1;
+    total += w;
+    if (tokenFound(t, otTokens, otJoined)) hit += w;
+  }
+  return hit / total;
+}
+// queueText = ชื่องานในคิว, otText = ชื่องาน (+สถานที่) ที่น้องลง
+function taskMatchScore(queueText, otText) {
+  const otTokens = taskTokens(otText);
+  const otJoined = otTokens.join("");
+  const main = (queueText || "").split("(")[0];         // ส่วนหลักก่อนวงเล็บ (หลังวงเล็บมักเป็นโน้ต)
+  const s1 = main.trim() ? scoreAgainst(main, otTokens, otJoined) : 0;
+  const s2 = scoreAgainst(queueText, otTokens, otJoined);
+  return Math.max(s1, s2);
 }
 
 // อ่านคิวงาน — tab name = yearCE (เช่น "2026")
@@ -3330,7 +3450,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
           if (s > best) best = s;
         }
         matchScore = +best.toFixed(2);
-        if (best >= 0.3) { status = "ok"; note = `ชื่องานตรง (${Math.round(best*100)}%)`; }
+        if (best >= TASK_MATCH_OK) { status = "ok"; note = `ชื่องานตรง (${Math.round(best*100)}%)`; }
         else             { status = "task_mismatch"; note = `ชื่องานไม่ตรง (${Math.round(best*100)}%)`; }
       } else continue;
 
@@ -3405,7 +3525,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       if (isLead) {
         const ranked = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).sort((a, b) => b.sc - a.sc);
         // ★ v1.42.2: ต้องมีชื่องานตรงกับคิววันนั้นเสมอ (สแตนบาย/อัพหนัง ก็ต้องระบุงาน)
-        if (ranked[0] && ranked[0].sc >= 0.3) {
+        if (ranked[0] && ranked[0].sc >= TASK_MATCH_OK) {
           const kw = (`${o.task} ${o.location || ""}`.match(SUPPORT_RE) || [])[0];
           status = "ok";  // ★ v1.42.5: สแตนบายที่ชื่องานตรง = ถูกต้อง (รวมกับ ✅)
           matched = [ranked[0].e]; score = +ranked[0].sc.toFixed(2);
@@ -3420,12 +3540,12 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         let best = 0, bestE = mine[0];
         for (const e of mine) { const sc = otScore(o, e.store); if (sc > best) { best = sc; bestE = e; } }
         score = +best.toFixed(2);
-        matched = best >= 0.3 ? [bestE] : mine;
-        status = best >= 0.3 ? "ok" : "task_mismatch";
-        hint = best >= 0.3 ? "" : "มีชื่อในคิววันนี้ แต่เป็นงานอื่น";
+        matched = best >= TASK_MATCH_OK ? [bestE] : mine;
+        status = best >= TASK_MATCH_OK ? "ok" : "task_mismatch";
+        hint = best >= TASK_MATCH_OK ? "" : "มีชื่อในคิววันนี้ แต่เป็นงานอื่น";
       } else {
         // ไม่มีชื่อน้องในคิววันนั้น → หาเบาะแส
-        const sameDay = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= 0.3).sort((a, b) => b.sc - a.sc);
+        const sameDay = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= TASK_MATCH_OK).sort((a, b) => b.sc - a.sc);
         if (sameDay.length) {
           status = "not_listed";
           matched = [sameDay[0].e]; score = +sameDay[0].sc.toFixed(2);
@@ -3436,7 +3556,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
           let near = null;
           for (const delta of [-1, 1, -2, 2]) {
             const nd = shiftDatePB(o.date, delta);
-            const hit = (queueByDate.get(nd) || []).map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= 0.3).sort((a, b) => b.sc - a.sc)[0];
+            const hit = (queueByDate.get(nd) || []).map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= TASK_MATCH_OK).sort((a, b) => b.sc - a.sc)[0];
             if (hit) { near = { ...hit, date: nd }; break; }
           }
           if (near) {
@@ -3480,7 +3600,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         const a = leadRows[i], b = leadRows[j];
         if (a.name === b.name || a.date !== b.date) continue;
         const sameJob = (a._qref && a._qref === b._qref) ||
-          taskMatchScore(a.ot.task, b.ot.task) >= 0.5;
+          taskMatchScore(a.ot.task, b.ot.task) >= TASK_MATCH_OK;
         if (!sameJob) continue;
         for (const [x, y] of [[a, b], [b, a]]) {
           const t = y.ot.startTime && y.ot.startTime !== "-" ? ` ${y.ot.startTime}–${y.ot.endTime}` : "";
