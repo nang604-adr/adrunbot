@@ -1492,8 +1492,10 @@ const QC_STATUS = {
   date_off:       { icon: "📅", label: "วันไม่ตรง",   color: "#ffb74d", bg: "rgba(255,167,38,.15)" },
   task_mismatch:  { icon: "⚠️", label: "งานไม่ตรง",  color: "#ffb74d", bg: "rgba(255,167,38,.15)" },
   not_listed:     { icon: "❓", label: "ไม่มีชื่อ",    color: "#90caf9", bg: "rgba(144,202,249,.15)" },
+  support:        { icon: "🛟", label: "สแตนบาย",    color: "#80cbc4", bg: "rgba(128,203,196,.15)" },
   ok:             { icon: "✅", label: "ตรง",         color: "#81c784", bg: "rgba(0,185,0,.15)" },
 };
+const QC_PASS = new Set(["ok", "support"]);  // ★ v1.42.1: ไม่นับเป็นพิรุธ
 const QC_DOW = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 const qcBaht = n => "฿" + Number(n || 0).toLocaleString("th-TH");
 
@@ -1556,7 +1558,7 @@ function renderAdminQueueCheck() {
 
   const s = data.otSummary || {};
   const rows = data.otRows || [];
-  const flaggedCount = (s.total || 0) - (s.ok || 0);
+  const flaggedCount = (s.total || 0) - (s.ok || 0) - (s.support || 0);
 
   // ── ยอดเงิน ──
   const moneyHtml = `
@@ -1579,7 +1581,7 @@ function renderAdminQueueCheck() {
   const chipsHtml = `
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
       ${chip("flagged", "🎯 มีพิรุธ", flaggedCount)}
-      ${["not_found","leave_conflict","date_off","task_mismatch","not_listed","ok"].map(k =>
+      ${["not_found","leave_conflict","date_off","task_mismatch","not_listed","support","ok"].map(k =>
         chip(k, `${QC_STATUS[k].icon} ${QC_STATUS[k].label}`, s[k]||0, QC_STATUS[k].color)).join("")}
       ${chip("all", "ทั้งหมด", s.total||0)}
     </div>`;
@@ -1597,7 +1599,7 @@ function renderAdminQueueCheck() {
 
   // ── filter rows ──
   let view = rows;
-  if (STATE.qcFilter === "flagged") view = rows.filter(r => r.status !== "ok");
+  if (STATE.qcFilter === "flagged") view = rows.filter(r => !QC_PASS.has(r.status));
   else if (STATE.qcFilter !== "all") view = rows.filter(r => r.status === STATE.qcFilter);
   const names = [...new Set(rows.map(r => r.name))].sort((a, b) => a.localeCompare(b));
   if (STATE.qcName && !names.includes(STATE.qcName)) STATE.qcName = "";
@@ -1625,7 +1627,7 @@ function renderAdminQueueCheck() {
       <div style="background:var(--card);border:1px solid var(--border);border-left:3px solid ${st.color};border-radius:10px;padding:9px 10px;margin-bottom:8px;font-size:12px">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <b>${dd}/${mm}</b><span style="font-size:10px;color:${dayColor}">${QC_DOW[r.dow] ?? ""}${r.isHoliday ? " 🎌" : ""}</span>
-          <b style="margin-left:2px">${esc(r.name)}</b>
+          <b style="margin-left:2px">${esc(r.name)}</b>${r.isLead ? `<span title="หัวหน้างาน — เช็คแค่ว่าวันนั้นมีงานตรง" style="font-size:9px;background:rgba(239,108,0,.2);color:var(--orange);padding:1px 6px;border-radius:8px">👔 หัวหน้า</span>` : ""}
           <span style="margin-left:auto;background:${st.bg};color:${st.color};font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap">${st.icon} ${st.label}</span>
         </div>
         <div style="display:flex;gap:8px">
@@ -1634,7 +1636,7 @@ function renderAdminQueueCheck() {
           <div style="text-align:right;white-space:nowrap;font-weight:700">${qcBaht(o.pay)}${r.paidAt ? `<div style="font-size:9px;color:var(--sub);font-weight:400">🔒 จ่ายแล้ว</div>` : ""}</div>
         </div>
         <div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:11px;overflow-wrap:anywhere">${qHtml}</div>
-        ${r.hint ? `<div style="margin-top:4px;font-size:11px;color:${st.color}">→ ${esc(r.hint)}${r.score != null && r.status !== "ok" ? ` (${Math.round(r.score*100)}%)` : ""}</div>` : ""}
+        ${r.hint ? `<div style="margin-top:4px;font-size:11px;color:${st.color}">→ ${esc(r.hint)}${r.score != null && !QC_PASS.has(r.status) ? ` (${Math.round(r.score*100)}%)` : ""}</div>` : ""}
       </div>`;
   };
 

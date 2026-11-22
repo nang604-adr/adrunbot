@@ -3347,6 +3347,19 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
     const leaveByKey = new Map(leavesThisMonth.map(l => [`${l.name}|${l.date}`, l]));
     const fmtQ = e => ({ store: e.store, time: e.time, names: [...e.emps].slice(0, 8), unknown: e.unknown, hasAll: e.hasAll });
 
+    // ★ v1.42.1: หัวหน้างาน (คุมทั้งทีมแอดรัน + ทีมซับ + สแตนบาย/อัพหนัง)
+    //   → ไม่ต้องมีชื่อในคิว · ผ่านถ้าชื่องาน OT ตรงกับงานใดก็ได้ในคิววันนั้น
+    //   หัวหน้างาน = role "supervisor" ใน Employees + รายชื่อใน QUEUE_LEAD_NAMES (default: Bow, Woot)
+    const leadNames = new Set(
+      (process.env.QUEUE_LEAD_NAMES || "Bow,Woot").split(/[,，]/).map(x => x.trim().toLowerCase()).filter(Boolean));
+    const isLeadEmp = name => {
+      const n = (name || "").toLowerCase();
+      if (leadNames.has(n)) return true;
+      const emp = employees.find(e => e.name.toLowerCase() === n);
+      return !!(emp && emp.role === "supervisor");
+    };
+    const SUPPORT_RE = /สแตนบาย|สแตนด์บาย|standby|stand by|อัพหนัง|อัปหนัง|อัพโหลด|อัปโหลด|upload|ซัพพอร์ต|support|คุมงาน|ควบคุมงาน|เฝ้างาน|เฝ้าระบบ/i;
+
     const otRows = [];
     for (const o of otsThisMonth) {
       if (!o.name || o.otType === "เงินเดือน" || (o.otType && o.otType.startsWith("ลา"))) continue;
@@ -3354,8 +3367,24 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       const mine = dayQ.filter(e => e.emps.has(o.name));
       const leave = leaveByKey.get(`${o.name}|${o.date}`);
       let status, hint = "", score = null, matched = [];
+      const isLead = isLeadEmp(o.name);
+      let leadHandled = false;
+      if (isLead) {
+        const ranked = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).sort((a, b) => b.sc - a.sc);
+        if (ranked[0] && ranked[0].sc >= 0.3) {
+          status = "ok"; matched = [ranked[0].e]; score = +ranked[0].sc.toFixed(2);
+          hint = "หัวหน้างาน — ตรงกับงานในคิววันนี้";
+          leadHandled = true;
+        } else if (dayQ.length && SUPPORT_RE.test(`${o.task} ${o.location || ""}`)) {
+          status = "support"; matched = dayQ.slice(0, 5);
+          hint = `หัวหน้างาน: ${(`${o.task} ${o.location || ""}`.match(SUPPORT_RE) || [""])[0]} — วันนี้มีคิว ${dayQ.length} งาน`;
+          leadHandled = true;
+        }
+      }
 
-      if (mine.length) {
+      if (leadHandled) {
+        // หัวหน้างาน ผ่านแล้ว
+      } else if (!isLead && mine.length) {
         let best = 0, bestE = mine[0];
         for (const e of mine) { const sc = otScore(o, e.store); if (sc > best) { best = sc; bestE = e; } }
         score = +best.toFixed(2);
@@ -3391,6 +3420,10 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
           }
         }
       }
+      if (isLead && !leadHandled && status === "not_found" && dayQ.length) {
+        matched = dayQ.slice(0, 5);
+        hint = `หัวหน้างาน — ชื่องาน OT ไม่ตรงกับคิววันนี้ (มี ${dayQ.length} งาน ดูด้านบน)`;
+      }
       if (leave) {  // ลง OT วันที่ลา = พิรุธเสมอ
         status = "leave_conflict";
         hint = `ลง OT วันที่${/^ลา/.test(leave.leaveType || "") ? leave.leaveType : "ลา" + (leave.leaveType || "")}` + (hint ? ` · ${hint}` : "");
@@ -3399,13 +3432,14 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         idx: o.idx, date: o.date, name: o.name,
         ot: { task: o.task, location: o.location, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType, pay: o.pay, nightShift: o.nightShift },
         paidAt: o.paidAt || "",
+        isLead,
         status, hint, score,
         queue: matched.map(fmtQ),
         dow: (() => { const [d, m, y] = o.date.split("/").map(Number); return new Date(y - 543, m - 1, d).getDay(); })(),
         isHoliday: holidaySet.has(o.date),
       });
     }
-    const otOrder = { not_found: 0, leave_conflict: 1, date_off: 2, task_mismatch: 3, not_listed: 4, ok: 5 };
+    const otOrder = { not_found: 0, leave_conflict: 1, date_off: 2, task_mismatch: 3, not_listed: 4, support: 5, ok: 6 };
     otRows.sort((a, b) => {
       const so = (otOrder[a.status] ?? 9) - (otOrder[b.status] ?? 9);
       if (so !== 0) return so;
@@ -3417,7 +3451,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
     for (const r of otRows) {
       otSummary[r.status]++;
       otSummary.totalPay += r.ot.pay || 0;
-      if (r.status !== "ok") otSummary.flaggedPay += r.ot.pay || 0;
+      if (r.status !== "ok" && r.status !== "support") otSummary.flaggedPay += r.ot.pay || 0;
     }
 
     res.json({
