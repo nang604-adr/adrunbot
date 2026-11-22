@@ -3337,6 +3337,86 @@ async function getQueueRecordsForMonth(sheets, month, yearCE) {
   return { rows: items };
 }
 
+// ★ v1.44: อนุมัติรายการ OT ที่รีวิวแล้ว — เก็บแยกใน sheet QC_Approvals (ไม่แตะ OT_Records)
+//   key = hash ของ วันที่+เวลา+ชื่องาน+createdAt → ถ้าน้องแก้ OT ภายหลัง key เปลี่ยน = ต้องรีวิวใหม่
+const QC_SHEET = "QC_Approvals";
+function qcKeyOf(o) {
+  return crypto.createHash("sha1")
+    .update([o.date, o.startTime, o.endTime, (o.task || "").trim(), o.createdAt].join("|"))
+    .digest("hex").slice(0, 16);
+}
+async function ensureQcSheet(sheets) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  if (meta.data.sheets.some(x => x.properties.title === QC_SHEET)) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    resource: { requests: [{ addSheet: { properties: { title: QC_SHEET } } }] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID, range: `${QC_SHEET}!A1:H2`, valueInputOption: "USER_ENTERED",
+    resource: { values: [
+      ["✅ อนุมัติ OT หลังตรวจคิว (Adrun)", "", "", "", "", "", "", ""],
+      ["key", "name", "date", "task", "pay", "statusAtApproval", "approvedBy", "approvedAt"],
+    ] },
+  });
+  console.log(`✅ สร้าง sheet ${QC_SHEET} แล้ว`);
+}
+async function getQcApprovals(sheets) {
+  await ensureQcSheet(sheets);
+  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${QC_SHEET}!A3:H20000` });
+  const map = new Map();
+  (r.data.values || []).forEach((row, i) => {
+    if (row[0]) map.set(row[0], { row: i + 3, by: row[6] || "", at: row[7] || "", statusAtApproval: row[5] || "" });
+  });
+  return map;
+}
+async function qcApproverName(sheets, req) {
+  const uid = (req.headers["x-line-user-id"] || req.query._uid || "").toString().trim();
+  try {
+    const emp = (await getEmployees(sheets)).find(e => e.userId === uid);
+    if (emp) return emp.name;
+  } catch (_) {}
+  return "Admin";
+}
+
+// POST /api/admin/queue-approve  { key, name, date, task, pay, status }
+app.post("/api/admin/queue-approve", requireAdmin, async (req, res) => {
+  const { key, name, date, task, pay, status } = req.body || {};
+  if (!key || !/^[0-9a-f]{16}$/.test(key)) return res.status(400).json({ error: "key ไม่ถูกต้อง" });
+  try {
+    const result = await withOTMutex("__qc_approvals__", async () => {
+      const sheets = await getSheetsClient();
+      const map = await getQcApprovals(sheets);
+      if (map.has(key)) return { ok: true, already: true, ...map.get(key) };
+      const by = await qcApproverName(sheets, req);
+      const at = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID, range: `${QC_SHEET}!A:H`, valueInputOption: "RAW",
+        resource: { values: [[ key, name || "", date || "", task || "", Number(pay) || 0, status || "", by, at ]] },
+      });
+      return { ok: true, by, at };
+    });
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/admin/queue-unapprove  { key }
+app.post("/api/admin/queue-unapprove", requireAdmin, async (req, res) => {
+  const { key } = req.body || {};
+  if (!key || !/^[0-9a-f]{16}$/.test(key)) return res.status(400).json({ error: "key ไม่ถูกต้อง" });
+  try {
+    const result = await withOTMutex("__qc_approvals__", async () => {
+      const sheets = await getSheetsClient();
+      const map = await getQcApprovals(sheets);
+      const hit = map.get(key);
+      if (!hit) return { ok: true, notFound: true };
+      await sheets.spreadsheets.values.clear({ spreadsheetId: SHEET_ID, range: `${QC_SHEET}!A${hit.row}:H${hit.row}` });
+      return { ok: true };
+    });
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Main endpoint — ตรวจ queue vs OT
 app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
   const month = Number(req.query.month);
@@ -3346,12 +3426,13 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
 
   try {
     const sheets = await getSheetsClient();
-    const [employeesRaw, queueResult, otRecords, leaveRecords, holidays] = await Promise.all([
+    const [employeesRaw, queueResult, otRecords, leaveRecords, holidays, qcApprovals] = await Promise.all([
       getEmployees(sheets),
       getQueueRecordsForMonth(sheets, month, yearCE),
       getAllRecords(sheets),
       getAllLeaves(sheets),
       getHolidayList(sheets).catch(() => []),
+      getQcApprovals(sheets).catch(() => new Map()),   // ★ v1.44
     ]);
     const employees = withDefaultAliases(employeesRaw);  // ★ v1.42.4
     const holidaySet = new Set(holidays.map(h => h.date));
@@ -3593,6 +3674,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       const qref = ["ok", "support", "date_off"].includes(status) && matched[0] ? matched[0] : null;
       otRows.push({
         _qref: qref,
+        key: qcKeyOf(o),   // ★ v1.44
         idx: o.idx, date: o.date, name: o.name,
         origName: o.origName || "",   // ★ v1.43.2: ชื่อที่บันทึกใน OT_Records (ถ้าต่างจากชื่อปัจจุบัน)
         ot: { task: o.task, location: o.location, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType, pay: o.pay, nightShift: o.nightShift },
@@ -3622,8 +3704,15 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       }
     }
     for (const r of otRows) delete r._qref;
+    // ★ v1.44: รายการที่ admin อนุมัติแล้ว → ย้ายไปกลุ่มถูกต้อง (เก็บสถานะเดิมไว้ดู)
+    for (const r of otRows) {
+      const ap = qcApprovals.get(r.key);
+      if (!ap) continue;
+      r.approval = { by: ap.by, at: ap.at };
+      if (r.status !== "ok") { r.origStatus = r.status; r.status = "approved"; }
+    }
 
-    const otOrder = { not_found: 0, leave_conflict: 1, lead_dup: 2, date_off: 3, task_mismatch: 4, not_listed: 5, support: 6, ok: 7 };
+    const otOrder = { not_found: 0, leave_conflict: 1, lead_dup: 2, date_off: 3, task_mismatch: 4, not_listed: 5, support: 6, approved: 7, ok: 8 };
     otRows.sort((a, b) => {
       const so = (otOrder[a.status] ?? 9) - (otOrder[b.status] ?? 9);
       if (so !== 0) return so;
@@ -3635,7 +3724,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
     for (const r of otRows) {
       otSummary[r.status]++;
       otSummary.totalPay += r.ot.pay || 0;
-      if (r.status !== "ok" && r.status !== "support") otSummary.flaggedPay += r.ot.pay || 0;
+      if (!["ok", "support", "approved"].includes(r.status)) otSummary.flaggedPay += r.ot.pay || 0;
     }
 
     res.json({

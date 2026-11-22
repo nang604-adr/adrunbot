@@ -1495,8 +1495,49 @@ const QC_STATUS = {
   not_listed:     { icon: "❓", label: "ไม่มีชื่อ",    color: "#90caf9", bg: "rgba(144,202,249,.15)" },
   support:        { icon: "🛟", label: "สแตนบาย",    color: "#80cbc4", bg: "rgba(128,203,196,.15)" },
   ok:             { icon: "✅", label: "ตรง",         color: "#81c784", bg: "rgba(0,185,0,.15)" },
+  approved:       { icon: "👍", label: "อนุมัติแล้ว",  color: "#a5d6a7", bg: "rgba(0,185,0,.12)" },
 };
-const QC_PASS = new Set(["ok", "support"]);  // ★ v1.42.1: ไม่นับเป็นพิรุธ
+const QC_PASS = new Set(["ok", "support", "approved"]);  // ★ v1.44: ไม่นับเป็นพิรุธ
+
+// ★ v1.44: สรุปคำนวณจาก rows (อัปเดตทันทีหลังกดอนุมัติ ไม่ต้องโหลดใหม่)
+function qcSummarize(rows) {
+  const s = { total: rows.length, totalPay: 0, flaggedPay: 0 };
+  for (const r of rows) {
+    s[r.status] = (s[r.status] || 0) + 1;
+    s.totalPay += r.ot.pay || 0;
+    if (!QC_PASS.has(r.status)) s.flaggedPay += r.ot.pay || 0;
+  }
+  return s;
+}
+
+STATE.qcBusy = STATE.qcBusy || {};
+async function qcApprove(key, undo) {
+  const data = STATE.qcCache && STATE.qcCache[qcKey()];
+  const r = data && (data.otRows || []).find(x => x.key === key);
+  if (!r || STATE.qcBusy[key]) return;
+  STATE.qcBusy[key] = true;
+  renderAdminQueueCheck();
+  try {
+    const res = await apiFetch(undo ? "/api/admin/queue-unapprove" : "/api/admin/queue-approve", {
+      method: "POST",
+      body: JSON.stringify(undo ? { key } : { key, name: r.name, date: r.date, task: r.ot.task, pay: r.ot.pay, status: r.status }),
+    });
+    const j = await res.json();
+    if (!res.ok || !j.ok) throw new Error(j.error || ("HTTP " + res.status));
+    if (undo) {
+      if (r.origStatus) r.status = r.origStatus;
+      delete r.origStatus; delete r.approval;
+    } else {
+      r.origStatus = r.status; r.status = "approved";
+      r.approval = { by: j.by || "Admin", at: j.at || "" };
+    }
+    toast(undo ? "↩️ ยกเลิกอนุมัติแล้ว" : "👍 อนุมัติแล้ว");
+  } catch (e) {
+    toast("❌ อนุมัติไม่สำเร็จ: " + e.message, "err");
+  }
+  delete STATE.qcBusy[key];
+  renderAdminQueueCheck();
+}
 const QC_DOW = ["อา","จ","อ","พ","พฤ","ศ","ส"];
 const qcBaht = n => "฿" + Number(n || 0).toLocaleString("th-TH");
 
@@ -1557,13 +1598,13 @@ function renderAdminQueueCheck() {
     return;
   }
 
-  const s = data.otSummary || {};
   const rows = data.otRows || [];
-  const flaggedCount = (s.total || 0) - (s.ok || 0) - (s.support || 0);
+  const s = qcSummarize(rows);   // ★ v1.44
+  const flaggedCount = rows.filter(r => !QC_PASS.has(r.status)).length;  // ★ v1.44
 
   // ── ★ v1.43.1: การ์ดสรุป 3 กลุ่ม (กดดูได้) → ต้องรีวิว แยกประเภทย่อย ──
   const REVIEW_TYPES = ["not_found", "leave_conflict", "lead_dup", "date_off", "task_mismatch", "not_listed"];
-  const okCount = (s.ok || 0) + (s.support || 0);
+  const okCount = (s.ok || 0) + (s.support || 0) + (s.approved || 0);
   const okPay = (s.totalPay || 0) - (s.flaggedPay || 0);
   const inReview = STATE.qcFilter === "flagged" || REVIEW_TYPES.includes(STATE.qcFilter);
   const bigCard = (f, active, title, n, pay, color, bg) => `
@@ -1618,6 +1659,23 @@ function renderAdminQueueCheck() {
       ${names.map(n => `<option value="${esc(n)}" ${STATE.qcName===n?'selected':''}>${esc(n)}</option>`).join("")}
     </select>`;
 
+  // ── ★ v1.44: ปุ่มอนุมัติ / ยกเลิก ──
+  function qcActionHtml(r) {
+    const busy = !!STATE.qcBusy[r.key];
+    if (r.status === "approved") {
+      const orig = QC_STATUS[r.origStatus];
+      return `<div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
+        <div style="flex:1;font-size:10px;color:var(--sub)">👍 อนุมัติโดย ${esc(r.approval?.by || "-")} · ${esc((r.approval?.at || "").split(" ")[0])}${orig ? `<br>เดิม: ${orig.icon} ${orig.label}` : ""}</div>
+        <button class="btn btn-grey btn-sm" ${busy ? "disabled" : ""} onclick="qcApprove('${r.key}', true)" style="padding:5px 10px">${busy ? "⏳" : "↩️ ยกเลิก"}</button>
+      </div>`;
+    }
+    if (QC_PASS.has(r.status)) return "";
+    return `<div style="display:flex;justify-content:flex-end;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border)">
+      <button class="btn btn-sm" ${busy ? "disabled" : ""} onclick="qcApprove('${r.key}')"
+        style="padding:6px 14px;background:rgba(0,185,0,.15);color:#81c784;border:1px solid rgba(0,185,0,.4)">${busy ? "⏳ กำลังบันทึก..." : "✓ ตรวจแล้ว อนุมัติ"}</button>
+    </div>`;
+  }
+
   // ── การ์ดต่อ 1 รายการ OT ──
   const cardHtml = r => {
     const st = QC_STATUS[r.status] || { icon: "?", label: r.status, color: "var(--sub)", bg: "var(--card2)" };
@@ -1642,7 +1700,8 @@ function renderAdminQueueCheck() {
           <div style="text-align:right;white-space:nowrap;font-weight:700">${qcBaht(o.pay)}${r.paidAt ? `<div style="font-size:9px;color:var(--sub);font-weight:400">🔒 จ่ายแล้ว</div>` : ""}</div>
         </div>
         <div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:11px;overflow-wrap:anywhere">${qHtml}</div>
-        ${r.hint ? `<div style="margin-top:4px;font-size:11px;color:${st.color}">→ ${esc(r.hint)}${r.score != null && !QC_PASS.has(r.status) ? ` (${Math.round(r.score*100)}%)` : ""}</div>` : ""}
+        ${r.hint ? `<div style="margin-top:4px;font-size:11px;color:${r.status === "approved" ? "var(--sub)" : st.color}">→ ${esc(r.hint)}${r.score != null && !QC_PASS.has(r.status) ? ` (${Math.round(r.score*100)}%)` : ""}</div>` : ""}
+        ${qcActionHtml(r)}
       </div>`;
   };
 
