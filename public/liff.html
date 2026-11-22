@@ -1576,7 +1576,7 @@ function renderAdminQueueCheck() {
   const unkHtml = unk.length ? `
     <div style="background:rgba(255,167,38,.1);border:1px solid rgba(255,167,38,.3);border-radius:10px;padding:8px 10px;font-size:11px;margin-bottom:8px">
       <div style="color:#ffb74d;font-weight:700;margin-bottom:4px">❓ ชื่อในคิวที่ยังจับคู่ไม่ได้ (${unk.length})</div>
-      <div style="color:var(--text);line-height:1.7">${unk.map(n => `<span style="background:var(--card2);padding:1px 7px;border-radius:8px;margin-right:4px;white-space:nowrap">${esc(n)}</span>`).join("")}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;color:var(--text)">${unk.map(n => `<span style="background:var(--card2);padding:1px 7px;border-radius:8px;white-space:nowrap">${esc(n)}</span>`).join("")}</div>
       <div style="color:var(--sub);margin-top:4px">→ เติมใน Employees คอลัมน์ K (aliasTh) คั่นด้วย , แล้วกดเช็คใหม่</div>
     </div>` : "";
   const skipHtml = (s.skipped || s.allQueue) ? `
@@ -1609,23 +1609,25 @@ function renderAdminQueueCheck() {
       || (r.leave ? `<span style="color:#ce93d8">ลา${esc(r.leave.type||"")}</span>` : `<span style="color:var(--sub)">—</span>`);
     return `
       <tr style="border-top:1px solid var(--border);vertical-align:top">
-        <td style="padding:7px 4px;white-space:nowrap">${dd}/${mm}<div style="font-size:9px;color:${dayColor}">${QC_DOW[r.dow] ?? ""}${r.isHoliday ? " 🎌" : ""}</div></td>
-        <td style="padding:7px 4px;${r.isUnknown ? 'color:#ffb74d' : ''}">${esc(r.name)}${r.isUnknown ? " ❓" : ""}${r.fromAll ? `<div style="font-size:9px;color:var(--sub)">👥 All</div>` : ""}</td>
-        <td style="padding:7px 4px">${queueTxt}</td>
-        <td style="padding:7px 4px">${otTxt}</td>
-        <td style="padding:7px 4px;white-space:nowrap">
-          <span class="badge" style="background:${st.bg};color:${st.color};font-weight:700">${st.icon} ${st.label}</span>
+        <td style="padding:7px 3px">${dd}/${mm}<div style="font-size:9px;color:${dayColor}">${QC_DOW[r.dow] ?? ""}${r.isHoliday ? " 🎌" : ""}</div></td>
+        <td style="padding:7px 3px;word-break:break-word;${r.isUnknown ? 'color:#ffb74d' : ''}">${esc(r.name)}${r.isUnknown ? " ❓" : ""}${r.fromAll ? `<div style="font-size:9px;color:var(--sub)">👥 All</div>` : ""}</td>
+        <td style="padding:7px 3px;word-break:break-word;overflow-wrap:anywhere">${queueTxt}</td>
+        <td style="padding:7px 3px;word-break:break-word;overflow-wrap:anywhere">${otTxt}</td>
+        <td style="padding:7px 2px;text-align:center">
+          <div style="background:${st.bg};color:${st.color};font-weight:700;border-radius:8px;padding:3px 2px;font-size:9px;line-height:1.3">
+            <div style="font-size:13px">${st.icon}</div>${st.label}</div>
           ${r.status === "task_mismatch" || r.status === "ok" ? `<div style="font-size:9px;color:var(--sub);margin-top:2px">${Math.round((r.matchScore||0)*100)}%</div>` : ""}
         </td>
       </tr>`;
   };
 
   const tableHtml = view.length ? `
-    <div class="card" style="overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse;font-size:11px;min-width:460px">
+    <div class="card">
+      <table style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">
+        <colgroup><col style="width:40px"><col style="width:52px"><col><col style="width:26%"><col style="width:54px"></colgroup>
         <thead><tr style="color:var(--sub);text-align:left;font-size:10px">
-          <th style="padding:8px 4px">วันที่</th><th style="padding:8px 4px">ชื่อ</th>
-          <th style="padding:8px 4px">คิวงาน</th><th style="padding:8px 4px">OT</th><th style="padding:8px 4px">สถานะ</th>
+          <th style="padding:8px 3px">วันที่</th><th style="padding:8px 3px">ชื่อ</th>
+          <th style="padding:8px 3px">คิวงาน</th><th style="padding:8px 3px">OT</th><th style="padding:8px 3px;text-align:center">สถานะ</th>
         </tr></thead>
         <tbody>${view.map(rowHtml).join("")}</tbody>
       </table>
