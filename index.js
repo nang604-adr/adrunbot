@@ -3371,13 +3371,12 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       let leadHandled = false;
       if (isLead) {
         const ranked = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).sort((a, b) => b.sc - a.sc);
+        // ★ v1.42.2: ต้องมีชื่องานตรงกับคิววันนั้นเสมอ (สแตนบาย/อัพหนัง ก็ต้องระบุงาน)
         if (ranked[0] && ranked[0].sc >= 0.3) {
-          status = "ok"; matched = [ranked[0].e]; score = +ranked[0].sc.toFixed(2);
-          hint = "หัวหน้างาน — ตรงกับงานในคิววันนี้";
-          leadHandled = true;
-        } else if (dayQ.length && SUPPORT_RE.test(`${o.task} ${o.location || ""}`)) {
-          status = "support"; matched = dayQ.slice(0, 5);
-          hint = `หัวหน้างาน: ${(`${o.task} ${o.location || ""}`.match(SUPPORT_RE) || [""])[0]} — วันนี้มีคิว ${dayQ.length} งาน`;
+          const kw = (`${o.task} ${o.location || ""}`.match(SUPPORT_RE) || [])[0];
+          status = kw ? "support" : "ok";
+          matched = [ranked[0].e]; score = +ranked[0].sc.toFixed(2);
+          hint = kw ? `หัวหน้างาน: ${kw} — ตรงกับงานในคิววันนี้` : "หัวหน้างาน — ตรงกับงานในคิววันนี้";
           leadHandled = true;
         }
       }
@@ -3428,7 +3427,9 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         status = "leave_conflict";
         hint = `ลง OT วันที่${/^ลา/.test(leave.leaveType || "") ? leave.leaveType : "ลา" + (leave.leaveType || "")}` + (hint ? ` · ${hint}` : "");
       }
+      const qref = ["ok", "support", "date_off"].includes(status) && matched[0] ? matched[0] : null;
       otRows.push({
+        _qref: qref,
         idx: o.idx, date: o.date, name: o.name,
         ot: { task: o.task, location: o.location, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType, pay: o.pay, nightShift: o.nightShift },
         paidAt: o.paidAt || "",
@@ -3439,7 +3440,26 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         isHoliday: holidaySet.has(o.date),
       });
     }
-    const otOrder = { not_found: 0, leave_conflict: 1, date_off: 2, task_mismatch: 3, not_listed: 4, support: 5, ok: 6 };
+    // ★ v1.42.2: หัวหน้างาน 2 คน ห้ามลง OT ชนงานเดียวกัน (วันเดียวกัน + งานคิวเดียวกัน / ชื่องานคล้ายกัน)
+    const leadRows = otRows.filter(r => r.isLead);
+    for (let i = 0; i < leadRows.length; i++) {
+      for (let j = i + 1; j < leadRows.length; j++) {
+        const a = leadRows[i], b = leadRows[j];
+        if (a.name === b.name || a.date !== b.date) continue;
+        const sameJob = (a._qref && a._qref === b._qref) ||
+          taskMatchScore(a.ot.task, b.ot.task) >= 0.5;
+        if (!sameJob) continue;
+        for (const [x, y] of [[a, b], [b, a]]) {
+          const t = y.ot.startTime && y.ot.startTime !== "-" ? ` ${y.ot.startTime}–${y.ot.endTime}` : "";
+          const msg = `ชนงานเดียวกับ ${y.name}${t} ("${y.ot.task}")`;
+          if (x.status !== "leave_conflict") x.status = "lead_dup";
+          if (!x.hint.includes(msg)) x.hint = x.hint ? `${msg} · ${x.hint}` : msg;
+        }
+      }
+    }
+    for (const r of otRows) delete r._qref;
+
+    const otOrder = { not_found: 0, leave_conflict: 1, lead_dup: 2, date_off: 3, task_mismatch: 4, not_listed: 5, support: 6, ok: 7 };
     otRows.sort((a, b) => {
       const so = (otOrder[a.status] ?? 9) - (otOrder[b.status] ?? 9);
       if (so !== 0) return so;

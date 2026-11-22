@@ -1489,6 +1489,7 @@ function showAdminSub(sub) {
 const QC_STATUS = {
   not_found:      { icon: "🚩", label: "ไม่พบในคิว",  color: "#ef9a9a", bg: "rgba(239,83,80,.18)" },
   leave_conflict: { icon: "🏖️", label: "OT วันลา",   color: "#ce93d8", bg: "rgba(206,147,216,.18)" },
+  lead_dup:       { icon: "👥", label: "หัวหน้าชนงาน", color: "#ff8a65", bg: "rgba(255,138,101,.18)" },
   date_off:       { icon: "📅", label: "วันไม่ตรง",   color: "#ffb74d", bg: "rgba(255,167,38,.15)" },
   task_mismatch:  { icon: "⚠️", label: "งานไม่ตรง",  color: "#ffb74d", bg: "rgba(255,167,38,.15)" },
   not_listed:     { icon: "❓", label: "ไม่มีชื่อ",    color: "#90caf9", bg: "rgba(144,202,249,.15)" },
@@ -1581,7 +1582,7 @@ function renderAdminQueueCheck() {
   const chipsHtml = `
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
       ${chip("flagged", "🎯 มีพิรุธ", flaggedCount)}
-      ${["not_found","leave_conflict","date_off","task_mismatch","not_listed","support","ok"].map(k =>
+      ${["not_found","leave_conflict","lead_dup","date_off","task_mismatch","not_listed","support","ok"].map(k =>
         chip(k, `${QC_STATUS[k].icon} ${QC_STATUS[k].label}`, s[k]||0, QC_STATUS[k].color)).join("")}
       ${chip("all", "ทั้งหมด", s.total||0)}
     </div>`;
