@@ -3061,3 +3061,87 @@ async function sendDailyLeaveBroadcast() {
 // รัน 8:30 ทุกวัน (Asia/Bangkok)
 cron.schedule("30 8 * * *", sendDailyLeaveBroadcast, { timezone: "Asia/Bangkok" });
 console.log("⏰ Cron registered: daily leave broadcast at 08:30 Asia/Bangkok");
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.39.3: Test endpoints — ไม่แตะ Google Sheet, ส่ง [TEST] marker
+// ══════════════════════════════════════════════════════════════
+
+// POST /api/admin/test-late-push — เทส late push (ไม่บันทึกชีต)
+app.post("/api/admin/test-late-push", requireAdmin, async (req, res) => {
+  if (!process.env.WORK_GROUP_ID) {
+    return res.status(400).json({ error: "WORK_GROUP_ID ไม่ได้ตั้งใน env" });
+  }
+  const { name = "TestUser", date, startTime, endTime, nightShift = false } = req.body || {};
+  if (!date || !startTime || !endTime) {
+    return res.status(400).json({ error: "ต้องส่ง date, startTime, endTime (ตัวอย่าง: {\"date\":\"21/11/2569\",\"startTime\":\"22:00\",\"endTime\":\"02:00\"})" });
+  }
+  try {
+    const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+    const late = computeLateArrival({ date, startTime, endTime, nightShift }, now);
+    if (!late) {
+      return res.json({
+        ok: true,
+        wouldPush: false,
+        message: `ไม่ late — expected start ไม่ตกวันนี้ (หลัง 08:30)`,
+        input: { name, date, startTime, endTime, nightShift }
+      });
+    }
+    const line = late.pastWorkEnd
+      ? `👤 ${name} — จบ OT ${late.endTime} → พักทั้งวัน · เริ่มได้ ${late.startTime}`
+      : `👤 ${name} — จบ OT ${late.endTime} → เข้างาน ${late.startTime}`;
+    const msg = `🧪 [TEST] 🌙 เข้างานสาย (พัก ${REST_HOURS} ชม.)\n${line}\n\nℹ️ ข้อความทดสอบ — ไม่บันทึกข้อมูลจริง`;
+    await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    console.log(`🧪 Test push late-arrival: ${name} → ${late.startTime}`);
+    return res.json({ ok: true, wouldPush: true, pushed: late, input: { name, date, startTime, endTime, nightShift } });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/test-daily-broadcast — รัน broadcast รายวันตอนนี้ (ใช้ข้อมูลจริง แต่ไม่บันทึกอะไร)
+app.post("/api/admin/test-daily-broadcast", requireAdmin, async (req, res) => {
+  if (!process.env.WORK_GROUP_ID) {
+    return res.status(400).json({ error: "WORK_GROUP_ID ไม่ได้ตั้งใน env" });
+  }
+  try {
+    const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+    const dd = String(now.getDate()).padStart(2, "0");
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const yyyy = now.getFullYear() + 543;
+    const todayStr = `${dd}/${mm}/${yyyy}`;
+    const dow = now.getDay();
+    const dayLabel = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"][dow];
+    const sheets = await getSheetsClient();
+    const [leaves, lateList] = await Promise.all([
+      getAllLeaves(sheets).then(all => all.filter(l => l.date === todayStr)),
+      getLateArrivalsForToday(sheets, now),
+    ]);
+
+    const parts = [`🧪 [TEST] ☀️ อรุณสวัสดิ์ — วันนี้ ${todayStr} (วัน${dayLabel})`];
+    if (leaves.length === 0 && lateList.length === 0) {
+      parts.push("\n✅ ไม่มีคนลา และไม่มีคนเข้าสาย — ปกติแล้วจะไม่ push ข้อความนี้");
+    }
+    if (leaves.length > 0) {
+      const leaveLines = leaves.map(l => {
+        const icon = l.leaveType === "ลาป่วย" ? "🤒" : l.leaveType === "ลากิจ" ? "📋" : "🏖️";
+        const reason = l.reason && l.reason !== "-" ? ` (${l.reason})` : "";
+        return `${icon} ${l.name} — ${l.leaveType}${reason}`;
+      }).join("\n");
+      parts.push(`\n🏖️ คนลา (${leaves.length} คน):\n${leaveLines}`);
+    }
+    if (lateList.length > 0) {
+      const lateLines = lateList.map(l => l.pastWorkEnd
+        ? `👤 ${l.name} — จบ OT ${l.endTime} → พักทั้งวัน · เริ่มได้ ${l.startTime}`
+        : `👤 ${l.name} — จบ OT ${l.endTime} → เข้างาน ${l.startTime}`
+      ).join("\n");
+      parts.push(`\n🌙 เข้างานสาย — OT ดึก (พัก ${REST_HOURS} ชม., ${lateList.length} คน):\n${lateLines}`);
+    }
+    parts.push("\nℹ️ ข้อความทดสอบ — ไม่กระทบระบบจริง");
+    const msg = parts.join("\n");
+    await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    console.log(`🧪 Test daily broadcast sent`);
+    return res.json({ ok: true, leaves: leaves.length, late: lateList.length });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
