@@ -1582,7 +1582,7 @@ function renderAdminQueueCheck() {
   const chipsHtml = `
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
       ${chip("flagged", "🎯 มีพิรุธ", flaggedCount)}
-      ${["not_found","leave_conflict","lead_dup","date_off","task_mismatch","not_listed","support","ok"].map(k =>
+      ${["not_found","leave_conflict","lead_dup","date_off","task_mismatch","not_listed","ok"].map(k =>
         chip(k, `${QC_STATUS[k].icon} ${QC_STATUS[k].label}`, s[k]||0, QC_STATUS[k].color)).join("")}
       ${chip("all", "ทั้งหมด", s.total||0)}
     </div>`;

@@ -3407,7 +3407,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         // ★ v1.42.2: ต้องมีชื่องานตรงกับคิววันนั้นเสมอ (สแตนบาย/อัพหนัง ก็ต้องระบุงาน)
         if (ranked[0] && ranked[0].sc >= 0.3) {
           const kw = (`${o.task} ${o.location || ""}`.match(SUPPORT_RE) || [])[0];
-          status = kw ? "support" : "ok";
+          status = "ok";  // ★ v1.42.5: สแตนบายที่ชื่องานตรง = ถูกต้อง (รวมกับ ✅)
           matched = [ranked[0].e]; score = +ranked[0].sc.toFixed(2);
           hint = kw ? `หัวหน้างาน: ${kw} — ตรงกับงานในคิววันนี้` : "หัวหน้างาน — ตรงกับงานในคิววันนี้";
           leadHandled = true;
