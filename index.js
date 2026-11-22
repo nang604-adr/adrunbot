@@ -684,6 +684,8 @@ app.post("/api/ot", rateLimitByUser, async (req, res) => {
       otType: "วันธรรมดา", pay,
       nightShift: !!nightShift,   // ★ v1.36
     });
+    // ★ v1.39.1: ถ้า OT นี้ทำให้เข้างานสายวันนี้ → push แจ้งกลุ่มทันที
+    pushLateIfNeeded({ name, date, startTime, endTime, nightShift: !!nightShift }).catch(() => {});
     return res.json({ ok: true, hours, payableHours, pay, otType: "วันธรรมดา", capped: payableHours < hours, nightShift: !!nightShift });
     });  // end withOTMutex
 
@@ -2823,6 +2825,8 @@ async function handleBotEvent(event) {
       const [task="", location=""] = after.includes("|") ? after.split("|").map(s=>s.trim()) : [after, ""];
       const pay   = Math.round(payableHours * empData.hourlyRate * WEEKDAY_MULTIPLIER);
       await saveRecord(sheets, { name:empData.name, date:todayDate, startTime, endTime, hours, task:task||"-", location, otType:"วันธรรมดา", pay });
+      // ★ v1.39.1: เช็ค late arrival (bot path)
+      pushLateIfNeeded({ name: empData.name, date: todayDate, startTime, endTime, nightShift: false }).catch(() => {});
       return { ok: true, payableHours, task };
     });
 
@@ -2861,6 +2865,50 @@ app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)
 // ★ v1.39: เพิ่ม "late arrival" — OT จบดึก → พัก REST_HOURS → เข้างานสาย
 // ══════════════════════════════════════════════════════════════
 const REST_HOURS = Number(process.env.REST_HOURS) || 10;  // พักหลัง OT
+
+// ★ v1.39.1: คำนวณว่า OT 1 record ทำให้เข้าสายวันนี้ไหม + push แจ้งกลุ่ม (ยิงทันทีตอนบันทึก)
+//   ใช้เมื่อพนักงานลง OT ย้อนหลังหลัง 8:30 — จะได้ไม่ตกข่าว
+function computeLateArrival(rec, now) {
+  if (!rec.startTime || rec.startTime === "-" || !rec.endTime || rec.endTime === "-") return null;
+  const parts = (rec.date || "").split("/").map(Number);
+  if (parts.length !== 3) return null;
+  const [dd, mm, yyyy] = parts;
+  const baseDate = new Date(yyyy - 543, mm - 1, dd);
+  const toMin = t => { const [h, m] = (t || "").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+  const startMin = toMin(rec.startTime);
+  let endMin = toMin(rec.endTime);
+  if (endMin < startMin) endMin += 1440;
+  if (rec.nightShift)    endMin += 1440;
+  const endAbs = new Date(baseDate.getTime() + endMin * 60 * 1000);
+  const expectedStart = new Date(endAbs.getTime() + REST_HOURS * 60 * 60 * 1000);
+
+  const today830 = new Date(now); today830.setHours(8, 30, 0, 0);
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(0, 0, 0, 0);
+  if (expectedStart < today830 || expectedStart >= tomorrow) return null;
+
+  return {
+    endTime: `${String(endAbs.getHours()).padStart(2,"0")}:${String(endAbs.getMinutes()).padStart(2,"0")}`,
+    startTime: `${String(expectedStart.getHours()).padStart(2,"0")}:${String(expectedStart.getMinutes()).padStart(2,"0")}`,
+    pastWorkEnd: (expectedStart.getHours() * 60 + expectedStart.getMinutes()) > (17 * 60 + 30),
+  };
+}
+
+async function pushLateIfNeeded(rec) {
+  if (!process.env.WORK_GROUP_ID) return;
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+  const late = computeLateArrival(rec, now);
+  if (!late) return;
+  const line = late.pastWorkEnd
+    ? `👤 ${rec.name} — จบ OT ${late.endTime} → พักทั้งวัน · เริ่มได้ ${late.startTime}`
+    : `👤 ${rec.name} — จบ OT ${late.endTime} → เข้างาน ${late.startTime}`;
+  const msg = `🌙 แจ้งเตือน — เข้างานสาย (พัก ${REST_HOURS} ชม.)\n${line}`;
+  try {
+    await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    console.log(`📤 Push late-arrival to group: ${rec.name}`);
+  } catch (e) {
+    console.error("Push late-arrival failed:", e.message);
+  }
+}
 
 // ★ v1.39: หา records OT ที่ทำให้เข้างานสายวันนี้
 async function getLateArrivalsForToday(sheets, now) {
