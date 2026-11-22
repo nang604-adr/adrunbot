@@ -3066,6 +3066,19 @@ console.log("⏰ Cron registered: daily leave broadcast at 08:30 Asia/Bangkok");
 // ★ v1.39.3: Test endpoints — ไม่แตะ Google Sheet, ส่ง [TEST] marker
 // ══════════════════════════════════════════════════════════════
 
+// ★ v1.40: GET /api/admin/debug-service-account — ดู client_email (สำหรับ share Google Sheet)
+app.get("/api/admin/debug-service-account", requireAdmin, async (req, res) => {
+  try {
+    const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON || "{}");
+    res.json({
+      client_email: creds.client_email || "(ไม่พบใน env)",
+      instruction: "ก็อป client_email ไป share Google Sheet คิวงาน (Viewer)",
+    });
+  } catch (e) {
+    res.status(500).json({ error: "parse JSON failed: " + e.message });
+  }
+});
+
 // POST /api/admin/test-late-push — เทส late push (ไม่บันทึกชีต)
 app.post("/api/admin/test-late-push", requireAdmin, async (req, res) => {
   if (!process.env.WORK_GROUP_ID) {
