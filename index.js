@@ -3118,7 +3118,7 @@ const QUEUE_ALIAS_DEFAULTS = {
   "scene":    ["ซีน"],
   "tinn":     ["ติน", "ดิน"],
   "touch":    ["ทัช"],
-  "dook":     ["ดุ๊ก", "ตุ๊ก"],
+  "dook":     ["ดุ๊ก", "ตุ๊ก", "ภาณุพงศ์"],  // ชื่อจริง ภาณุพงศ์ (ชื่อเดิมใน OT_Records)
   "ภาณุพงศ์": ["ดุ๊ก", "ตุ๊ก", "Dook"],
   "teay":     ["เตย"],
 };
@@ -3360,8 +3360,18 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
     const allTargets = employees.filter(e => e.role !== "admin");
 
     const monthKey = `/${String(month).padStart(2,"0")}/${year}`;
-    const otsThisMonth    = otRecords.filter(r => r.date && r.date.endsWith(monthKey));
-    const leavesThisMonth = leaveRecords.filter(l => l.date && l.date.endsWith(monthKey));
+    // ★ v1.43.2: ชื่อใน OT/Leave ที่เป็นชื่อเก่า (เปลี่ยนชื่อ col A แล้ว) → แปลงเป็นชื่อปัจจุบันผ่าน aliasTh (exact เท่านั้น)
+    const empNameSet = new Set(employees.map(e => e.name));
+    const resolveRecName = n => {
+      if (!n || empNameSet.has(n)) return n;
+      const nl = n.toLowerCase(), nn = normThaiName(n);
+      const emp = employees.find(e => (e.aliasTh || []).some(a => a.toLowerCase() === nl || normThaiName(a) === nn));
+      return emp ? emp.name : n;
+    };
+    const otsThisMonth = otRecords.filter(r => r.date && r.date.endsWith(monthKey))
+      .map(r => { const nm = resolveRecName(r.name); return nm === r.name ? r : { ...r, name: nm, origName: r.name }; });
+    const leavesThisMonth = leaveRecords.filter(l => l.date && l.date.endsWith(monthKey))
+      .map(l => ({ ...l, name: resolveRecName(l.name) }));
 
     // Build combined map
     const combined = new Map();
@@ -3584,6 +3594,7 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       otRows.push({
         _qref: qref,
         idx: o.idx, date: o.date, name: o.name,
+        origName: o.origName || "",   // ★ v1.43.2: ชื่อที่บันทึกใน OT_Records (ถ้าต่างจากชื่อปัจจุบัน)
         ot: { task: o.task, location: o.location, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType, pay: o.pay, nightShift: o.nightShift },
         paidAt: o.paidAt || "",
         isLead,

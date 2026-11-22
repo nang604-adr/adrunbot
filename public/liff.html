@@ -1633,7 +1633,7 @@ function renderAdminQueueCheck() {
       <div style="background:var(--card);border:1px solid var(--border);border-left:3px solid ${st.color};border-radius:10px;padding:9px 10px;margin-bottom:8px;font-size:12px">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
           <b>${dd}/${mm}</b><span style="font-size:10px;color:${dayColor}">${QC_DOW[r.dow] ?? ""}${r.isHoliday ? " 🎌" : ""}</span>
-          <b style="margin-left:2px">${esc(r.name)}</b>${r.isLead ? `<span title="หัวหน้างาน — เช็คแค่ว่าวันนั้นมีงานตรง" style="font-size:9px;background:rgba(239,108,0,.2);color:var(--orange);padding:1px 6px;border-radius:8px">👔 หัวหน้า</span>` : ""}
+          <b style="margin-left:2px">${esc(r.name)}</b>${r.origName ? `<span title="ชื่อที่บันทึกใน OT_Records" style="font-size:9px;color:#ffb74d">(ใน OT: ${esc(r.origName)})</span>` : ""}${r.isLead ? `<span title="หัวหน้างาน — เช็คแค่ว่าวันนั้นมีงานตรง" style="font-size:9px;background:rgba(239,108,0,.2);color:var(--orange);padding:1px 6px;border-radius:8px">👔 หัวหน้า</span>` : ""}
           <span style="margin-left:auto;background:${st.bg};color:${st.color};font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap">${st.icon} ${st.label}</span>
         </div>
         <div style="display:flex;gap:8px">
