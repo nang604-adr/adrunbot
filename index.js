@@ -3110,11 +3110,17 @@ function isQueueAllName(name) {
   return QUEUE_ALL_NAMES.has((name || "").trim().toLowerCase());
 }
 
+// ★ v1.42.3: normalize ชื่อเล่นไทย — ตัด ั ่ ้ ๊ ๋ ์ ็ + ช่องว่าง + lowercase
+function normThaiName(str) {
+  return (str || "").toLowerCase().replace(/[\u0E31\u0E47-\u0E4C\s]/g, "");
+}
+
 // match ชื่อไทย (จากคิวงาน) → employee object
 function matchEmployeeByThaiName(thaiName, employees) {
   const t = (thaiName || "").trim();
   if (!t) return null;
   const tLower = t.toLowerCase();
+  const tNorm = normThaiName(t);
   // 1) exact match aliasTh (case-insensitive)
   for (const emp of employees) {
     if (emp.aliasTh && emp.aliasTh.some(a => a.toLowerCase() === tLower)) return emp;
@@ -3122,6 +3128,13 @@ function matchEmployeeByThaiName(thaiName, employees) {
   // 2) fallback: match English name
   for (const emp of employees) {
     if (emp.name && emp.name.toLowerCase() === tLower) return emp;
+  }
+  // 2.5) ★ v1.42.3: ไม่สนวรรณยุกต์/ไม้หันอากาศ/การันต์ (อ้น = อั้น, แอร์ = แอร)
+  if (tNorm) {
+    for (const emp of employees) {
+      if (emp.aliasTh && emp.aliasTh.some(a => normThaiName(a) === tNorm)) return emp;
+      if (emp.name && normThaiName(emp.name) === tNorm) return emp;
+    }
   }
   // 3) partial match aliasTh (contains)
   for (const emp of employees) {
