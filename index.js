@@ -3127,8 +3127,10 @@ function taskMatchScore(a, b) {
 }
 
 // อ่านคิวงาน — tab name = yearCE (เช่น "2026")
+// ★ v1.40.1: hardcode fallback (Railway env var ไม่ propagate — ใช้ค่านี้ชั่วคราว)
+const QUEUE_SHEET_ID_FALLBACK = "1lxQYuqTZO6ubQ9btGUpbeGlg446yXIltqYuy12ju9bA";
 async function getQueueRecordsForMonth(sheets, month, yearCE) {
-  const queueSheetId = process.env.QUEUE_SHEET_ID;
+  const queueSheetId = process.env.QUEUE_SHEET_ID || QUEUE_SHEET_ID_FALLBACK;
   if (!queueSheetId) return { rows: [], warning: "QUEUE_SHEET_ID ไม่ได้ตั้งใน env" };
 
   const tabName = String(yearCE);
