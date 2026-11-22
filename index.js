@@ -3293,8 +3293,16 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
 app.get("/api/admin/debug-service-account", requireAdmin, async (req, res) => {
   try {
     const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON || "{}");
+    const envKeys = Object.keys(process.env)
+      .filter(k => !k.startsWith("RAILWAY_") && !k.startsWith("NODE_") && !k.startsWith("NPM_") && !k.startsWith("npm_") && k.length < 40)
+      .sort();
     res.json({
       client_email: creds.client_email || "(ไม่พบใน env)",
+      QUEUE_SHEET_ID_set: !!process.env.QUEUE_SHEET_ID,
+      QUEUE_SHEET_ID_length: (process.env.QUEUE_SHEET_ID || "").length,
+      QUEUE_SHEET_ID_first10: (process.env.QUEUE_SHEET_ID || "").substring(0, 10),
+      WORK_GROUP_ID_set: !!process.env.WORK_GROUP_ID,
+      visible_env_keys: envKeys,
       instruction: "ก็อป client_email ไป share Google Sheet คิวงาน (Viewer)",
     });
   } catch (e) {
