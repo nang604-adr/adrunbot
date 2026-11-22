@@ -3219,12 +3219,16 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
 
     const unknownNames = new Set();
     const skippedNames = new Set();
+    const queueByDate = new Map();  // ★ v1.42: date → [{store,time,emps:Set,unknown:[],hasAll}]
     let skippedCount = 0, allQueueCount = 0;
     for (const q of queueResult.rows) {
       const thais = [...new Set(splitThaiNames(q.thaiNames))];  // กันชื่อซ้ำในแถวเดียว
       const seenInRow = new Set();  // emp.name ที่ใส่แล้วในแถวนี้
       // ชื่อที่ระบุตรงๆ ก่อน → แล้วค่อย expand All (กันซ้ำ)
       const ordered = [...thais.filter(t => !isQueueAllName(t)), ...thais.filter(isQueueAllName)];
+      const qEntry = { store: q.store, time: q.time, date: q.date, emps: new Set(), unknown: [], hasAll: false };
+      if (!queueByDate.has(q.date)) queueByDate.set(q.date, []);
+      queueByDate.get(q.date).push(qEntry);
       for (const t of ordered) {
         if (isQueueSkipName(t, skipSet)) {
           skippedCount++; skippedNames.add(t);
@@ -3232,6 +3236,8 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         }
         if (isQueueAllName(t)) {
           allQueueCount++;
+          qEntry.hasAll = true;
+          for (const emp of allTargets) qEntry.emps.add(emp.name);
           for (const emp of allTargets) {
             if (seenInRow.has(emp.name)) continue;
             seenInRow.add(emp.name);
@@ -3241,8 +3247,9 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
         }
         const emp = matchEmployeeByThaiName(t, employees);
         if (emp && seenInRow.has(emp.name)) continue;
-        if (emp) seenInRow.add(emp.name);
+        if (emp) { seenInRow.add(emp.name); qEntry.emps.add(emp.name); }
         if (!emp) {
+          qEntry.unknown.push(t);
           unknownNames.add(t);
           const key = `__unknown__${t}|${q.date}`;
           getOrInit(key).queue.push({ ...q, thaiName: t, unknown: true });
@@ -3330,9 +3337,93 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
       allQueue:      allQueueCount,     // ★ v1.41: จำนวนคิวที่เป็น All
     };
 
+    // ══ ★ v1.42: OT-centric — ไล่ OT ทุกรายการที่ลง (ตัวตั้ง = เงินที่จะจ่าย) แล้วหาในคิว ══
+    const shiftDatePB = (dpb, delta) => {
+      const [d, m, y] = dpb.split("/").map(Number);
+      const dt = new Date(y - 543, m - 1, d + delta);
+      return `${String(dt.getDate()).padStart(2,"0")}/${String(dt.getMonth()+1).padStart(2,"0")}/${dt.getFullYear()+543}`;
+    };
+    const otScore = (o, store) => Math.max(taskMatchScore(store, o.task), taskMatchScore(store, `${o.task} ${o.location || ""}`));
+    const leaveByKey = new Map(leavesThisMonth.map(l => [`${l.name}|${l.date}`, l]));
+    const fmtQ = e => ({ store: e.store, time: e.time, names: [...e.emps].slice(0, 8), unknown: e.unknown, hasAll: e.hasAll });
+
+    const otRows = [];
+    for (const o of otsThisMonth) {
+      if (!o.name || o.otType === "เงินเดือน" || (o.otType && o.otType.startsWith("ลา"))) continue;
+      const dayQ = queueByDate.get(o.date) || [];
+      const mine = dayQ.filter(e => e.emps.has(o.name));
+      const leave = leaveByKey.get(`${o.name}|${o.date}`);
+      let status, hint = "", score = null, matched = [];
+
+      if (mine.length) {
+        let best = 0, bestE = mine[0];
+        for (const e of mine) { const sc = otScore(o, e.store); if (sc > best) { best = sc; bestE = e; } }
+        score = +best.toFixed(2);
+        matched = best >= 0.3 ? [bestE] : mine;
+        status = best >= 0.3 ? "ok" : "task_mismatch";
+        hint = best >= 0.3 ? "" : "มีชื่อในคิววันนี้ แต่เป็นงานอื่น";
+      } else {
+        // ไม่มีชื่อน้องในคิววันนั้น → หาเบาะแส
+        const sameDay = dayQ.map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= 0.3).sort((a, b) => b.sc - a.sc);
+        if (sameDay.length) {
+          status = "not_listed";
+          matched = [sameDay[0].e]; score = +sameDay[0].sc.toFixed(2);
+          hint = sameDay[0].e.unknown.length
+            ? `งานนี้มีในคิว — ชื่อในคิว "${sameDay[0].e.unknown.join(" ")}" ยังจับคู่ไม่ได้ (เติม aliasTh?)`
+            : "งานนี้มีในคิววันนี้ แต่ไม่มีชื่อน้อง";
+        } else {
+          let near = null;
+          for (const delta of [-1, 1, -2, 2]) {
+            const nd = shiftDatePB(o.date, delta);
+            const hit = (queueByDate.get(nd) || []).map(e => ({ e, sc: otScore(o, e.store) })).filter(x => x.sc >= 0.3).sort((a, b) => b.sc - a.sc)[0];
+            if (hit) { near = { ...hit, date: nd }; break; }
+          }
+          if (near) {
+            status = "date_off";
+            matched = [near.e]; score = +near.sc.toFixed(2);
+            hint = `เจองานนี้ในคิววันที่ ${near.date.slice(0,5)} (ลงวันผิด/ข้ามคืน?)`;
+          } else {
+            status = "not_found";
+            const unk = dayQ.flatMap(e => e.unknown);
+            hint = dayQ.length === 0 ? "วันนี้ไม่มีคิวงานเลย"
+                 : unk.length ? `ไม่พบงานนี้ในคิว (วันนี้มีชื่อที่ยังจับคู่ไม่ได้: ${[...new Set(unk)].join(" ")})`
+                 : "ไม่พบงานนี้ในคิว";
+          }
+        }
+      }
+      if (leave) {  // ลง OT วันที่ลา = พิรุธเสมอ
+        status = "leave_conflict";
+        hint = `ลง OT วันที่${/^ลา/.test(leave.leaveType || "") ? leave.leaveType : "ลา" + (leave.leaveType || "")}` + (hint ? ` · ${hint}` : "");
+      }
+      otRows.push({
+        idx: o.idx, date: o.date, name: o.name,
+        ot: { task: o.task, location: o.location, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType, pay: o.pay, nightShift: o.nightShift },
+        paidAt: o.paidAt || "",
+        status, hint, score,
+        queue: matched.map(fmtQ),
+        dow: (() => { const [d, m, y] = o.date.split("/").map(Number); return new Date(y - 543, m - 1, d).getDay(); })(),
+        isHoliday: holidaySet.has(o.date),
+      });
+    }
+    const otOrder = { not_found: 0, leave_conflict: 1, date_off: 2, task_mismatch: 3, not_listed: 4, ok: 5 };
+    otRows.sort((a, b) => {
+      const so = (otOrder[a.status] ?? 9) - (otOrder[b.status] ?? 9);
+      if (so !== 0) return so;
+      const [da, ma, ya] = a.date.split("/").map(Number), [db, mb, yb] = b.date.split("/").map(Number);
+      return (new Date(ya, ma - 1, da) - new Date(yb, mb - 1, db)) || a.name.localeCompare(b.name);
+    });
+    const otSummary = { total: otRows.length, totalPay: 0, flaggedPay: 0 };
+    for (const k of Object.keys(otOrder)) otSummary[k] = 0;
+    for (const r of otRows) {
+      otSummary[r.status]++;
+      otSummary.totalPay += r.ot.pay || 0;
+      if (r.status !== "ok") otSummary.flaggedPay += r.ot.pay || 0;
+    }
+
     res.json({
       ok: true,
       month, year,
+      otSummary, otRows,   // ★ v1.42: มุมมองหลัก (OT เป็นตัวตั้ง)
       summary,
       unknownNames: [...unknownNames],
       skippedNames: [...skippedNames],
