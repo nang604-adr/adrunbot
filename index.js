@@ -2488,7 +2488,7 @@ app.get("/liff", (_, res) => {
 async function getEmployees(sheets) {
   const r = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: "Employees!A3:J500",  // ★ v1.33: เพิ่ม column J (salary)
+    range: "Employees!A3:K500",  // ★ v1.40: + col K (aliasTh)
   });
   return (r.data.values || []).map((row, idx) => ({
     idx,
@@ -2501,7 +2501,8 @@ async function getEmployees(sheets) {
     socialSecurity:  Number(row[6]) || 0,    // ★ v1.25 (รายเดือน หัก)
     satHalfDay:      String(row[7] || "").toUpperCase() === "TRUE" || row[7] === true || row[7] === "1",
     role:           (row[8] || "").trim().toLowerCase(),  // ★ v1.32
-    salary:          Number(row[9]) || 0,    // ★ v1.33: เงินเดือนรายเดือน (จ่ายครั้งเดียวต่อเดือน)
+    salary:          Number(row[9]) || 0,    // ★ v1.33: เงินเดือนรายเดือน
+    aliasTh:        (row[10] || "").split(/[,，]/).map(s => s.trim()).filter(Boolean),  // ★ v1.40: ชื่อเล่นไทย (comma-separated)
   })).filter(e => e.name);
 }
 
@@ -3065,6 +3066,228 @@ console.log("⏰ Cron registered: daily leave broadcast at 08:30 Asia/Bangkok");
 // ══════════════════════════════════════════════════════════════
 // ★ v1.39.3: Test endpoints — ไม่แตะ Google Sheet, ส่ง [TEST] marker
 // ══════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════
+// ★ v1.40: QUEUE vs OT CROSS-CHECK — ตรวจคิวงาน vs OT ที่ลง
+//   - อ่านคิวงานจาก Google Sheet ตัวที่สอง (QUEUE_SHEET_ID)
+//   - เทียบกับ OT_Records + Leave_Records เดือนที่เลือก
+//   - fuzzy match ชื่อไทย ↔ อังกฤษ (aliasTh), ชื่องาน (keyword overlap)
+// ══════════════════════════════════════════════════════════════
+
+// แปลงวันที่ ค.ศ. → พ.ศ. (รองรับทั้ง 2 format)
+function queueDateToPB(dateStr) {
+  const parts = (dateStr || "").trim().split("/").map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return "";
+  const [dd, mm, yy] = parts;
+  const yyPB = yy < 2500 ? yy + 543 : yy;
+  return `${String(dd).padStart(2,"0")}/${String(mm).padStart(2,"0")}/${yyPB}`;
+}
+
+// split ชื่อไทย "แอร์ ซีน ดิน" → ["แอร์", "ซีน", "ดิน"]
+function splitThaiNames(str) {
+  return (str || "").split(/[\s,，\n\/\\]+/).map(s => s.trim()).filter(Boolean);
+}
+
+// match ชื่อไทย (จากคิวงาน) → employee object
+function matchEmployeeByThaiName(thaiName, employees) {
+  const t = (thaiName || "").trim();
+  if (!t) return null;
+  const tLower = t.toLowerCase();
+  // 1) exact match aliasTh (case-insensitive)
+  for (const emp of employees) {
+    if (emp.aliasTh && emp.aliasTh.some(a => a.toLowerCase() === tLower)) return emp;
+  }
+  // 2) fallback: match English name
+  for (const emp of employees) {
+    if (emp.name && emp.name.toLowerCase() === tLower) return emp;
+  }
+  // 3) partial match aliasTh (contains)
+  for (const emp of employees) {
+    if (emp.aliasTh && emp.aliasTh.some(a => a.toLowerCase().includes(tLower) || tLower.includes(a.toLowerCase()))) return emp;
+  }
+  return null;
+}
+
+// tokenize สำหรับ fuzzy task match
+function tokenizeTask(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/[\d\(\)\[\]\{\}\-,\.\/\\\+\|\=\_\"']+/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 2);
+}
+
+function taskMatchScore(a, b) {
+  const sa = new Set(tokenizeTask(a));
+  const sb = new Set(tokenizeTask(b));
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let common = 0;
+  for (const w of sa) if (sb.has(w)) common++;
+  return common / Math.min(sa.size, sb.size);
+}
+
+// อ่านคิวงาน — tab name = yearCE (เช่น "2026")
+async function getQueueRecordsForMonth(sheets, month, yearCE) {
+  const queueSheetId = process.env.QUEUE_SHEET_ID;
+  if (!queueSheetId) return { rows: [], warning: "QUEUE_SHEET_ID ไม่ได้ตั้งใน env" };
+
+  const tabName = String(yearCE);
+  // ใช้ google sheets client ของบอทเอง (service account ต้อง share กับ queue sheet แล้ว)
+  let raw = [];
+  try {
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: queueSheetId,
+      range: `${tabName}!A1:G5000`,
+    });
+    raw = r.data.values || [];
+  } catch (e) {
+    return { rows: [], warning: `อ่าน tab "${tabName}" ไม่สำเร็จ: ${e.message}` };
+  }
+
+  const items = [];
+  for (const row of raw) {
+    const store = (row[2] || "").trim();   // C
+    const dateCE = (row[3] || "").trim();  // D
+    const time = (row[4] || "").trim();    // E
+    const names = (row[5] || "").trim();   // F
+    if (!dateCE || !names) continue;
+    // ต้องเป็น date format D/M/YYYY
+    if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateCE)) continue;
+    const parts = dateCE.split("/").map(Number);
+    if (parts[1] !== month) continue; // filter month
+    const datePB = queueDateToPB(dateCE);
+    items.push({ store, date: datePB, time, thaiNames: names });
+  }
+  return { rows: items };
+}
+
+// Main endpoint — ตรวจ queue vs OT
+app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
+  const month = Number(req.query.month);
+  const year = Number(req.query.year);  // พ.ศ.
+  if (!month || !year) return res.status(400).json({ error: "ต้องระบุ month, year (พ.ศ.)" });
+  const yearCE = year - 543;
+
+  try {
+    const sheets = await getSheetsClient();
+    const [employees, queueResult, otRecords, leaveRecords] = await Promise.all([
+      getEmployees(sheets),
+      getQueueRecordsForMonth(sheets, month, yearCE),
+      getAllRecords(sheets),
+      getAllLeaves(sheets),
+    ]);
+
+    const monthKey = `/${String(month).padStart(2,"0")}/${year}`;
+    const otsThisMonth    = otRecords.filter(r => r.date && r.date.endsWith(monthKey));
+    const leavesThisMonth = leaveRecords.filter(l => l.date && l.date.endsWith(monthKey));
+
+    // Build combined map
+    const combined = new Map();
+    const getOrInit = (key) => {
+      if (!combined.has(key)) combined.set(key, { queue: [], ot: [], leave: null });
+      return combined.get(key);
+    };
+
+    const unknownNames = new Set();
+    for (const q of queueResult.rows) {
+      const thais = splitThaiNames(q.thaiNames);
+      for (const t of thais) {
+        const emp = matchEmployeeByThaiName(t, employees);
+        if (!emp) {
+          unknownNames.add(t);
+          const key = `__unknown__${t}|${q.date}`;
+          getOrInit(key).queue.push({ ...q, thaiName: t, unknown: true });
+        } else {
+          const key = `${emp.name}|${q.date}`;
+          getOrInit(key).queue.push({ ...q, thaiName: t, matchedName: emp.name });
+        }
+      }
+    }
+
+    for (const o of otsThisMonth) {
+      if (!o.name) continue;
+      if (o.otType === "เงินเดือน") continue;
+      if (o.otType && o.otType.startsWith("ลา")) continue;
+      const key = `${o.name}|${o.date}`;
+      getOrInit(key).ot.push(o);
+    }
+    for (const l of leavesThisMonth) {
+      if (!l.name) continue;
+      const key = `${l.name}|${l.date}`;
+      getOrInit(key).leave = l;
+    }
+
+    // Evaluate rows
+    const rows = [];
+    for (const [key, data] of combined) {
+      const [name, date] = key.split("|");
+      const { queue, ot, leave } = data;
+      let status, note = "", matchScore = null;
+      if (leave && queue.length > 0) {
+        status = "on_leave";
+        note = `ลา ${leave.leaveType}${leave.reason && leave.reason !== "-" ? " (" + leave.reason + ")" : ""}`;
+      } else if (leave && queue.length === 0 && ot.length === 0) {
+        continue; // ลาเฉยๆ ไม่มีคิว/OT → ไม่ต้องรายงาน
+      } else if (queue.length > 0 && ot.length === 0) {
+        status = "missing_ot";
+        note = "ลืมลง OT";
+      } else if (queue.length === 0 && ot.length > 0) {
+        status = "extra_ot";
+        note = "ไม่พบในคิวงาน";
+      } else if (queue.length > 0 && ot.length > 0) {
+        let best = 0;
+        for (const q of queue) for (const o of ot) {
+          const s = taskMatchScore(q.store, o.task);
+          if (s > best) best = s;
+        }
+        matchScore = +best.toFixed(2);
+        if (best >= 0.3) { status = "ok"; note = `ชื่องานตรง (${Math.round(best*100)}%)`; }
+        else             { status = "task_mismatch"; note = `ชื่องานไม่ตรง (${Math.round(best*100)}%)`; }
+      } else continue;
+
+      rows.push({
+        date, name: name.replace(/^__unknown__/, ""),
+        isUnknown: name.startsWith("__unknown__"),
+        queue: queue.map(q => ({ store: q.store, time: q.time, thaiName: q.thaiName })),
+        ot: ot.map(o => ({ task: o.task, startTime: o.startTime, endTime: o.endTime, hours: o.hours, otType: o.otType })),
+        leave: leave ? { type: leave.leaveType, reason: leave.reason } : null,
+        status, note, matchScore,
+      });
+    }
+
+    // sort by date → status (missing_ot, task_mismatch ก่อน) → name
+    const statusOrder = { missing_ot: 0, task_mismatch: 1, extra_ot: 2, on_leave: 3, ok: 4 };
+    rows.sort((a, b) => {
+      const [da, ma, ya] = a.date.split("/").map(Number);
+      const [db, mb, yb] = b.date.split("/").map(Number);
+      const dt = new Date(ya-543, ma-1, da) - new Date(yb-543, mb-1, db);
+      if (dt !== 0) return dt;
+      const so = (statusOrder[a.status]||99) - (statusOrder[b.status]||99);
+      if (so !== 0) return so;
+      return a.name.localeCompare(b.name);
+    });
+
+    const summary = {
+      total: rows.length,
+      ok:            rows.filter(r => r.status === "ok").length,
+      missing_ot:    rows.filter(r => r.status === "missing_ot").length,
+      extra_ot:      rows.filter(r => r.status === "extra_ot").length,
+      task_mismatch: rows.filter(r => r.status === "task_mismatch").length,
+      on_leave:      rows.filter(r => r.status === "on_leave").length,
+    };
+
+    res.json({
+      ok: true,
+      month, year,
+      summary,
+      unknownNames: [...unknownNames],
+      warnings: queueResult.warning ? [queueResult.warning] : [],
+      rows,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ★ v1.40: GET /api/admin/debug-service-account — ดู client_email (สำหรับ share Google Sheet)
 app.get("/api/admin/debug-service-account", requireAdmin, async (req, res) => {
