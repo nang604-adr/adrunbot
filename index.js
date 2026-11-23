@@ -3750,6 +3750,37 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
   }
 });
 
+// ★ v1.44.2: GET /api/admin/line-quota — ดูโควต้าข้อความ LINE OA เดือนนี้ (ใช้ไป / ทั้งหมด)
+app.get("/api/admin/line-quota", requireAdmin, async (req, res) => {
+  try {
+    const h = { Authorization: `Bearer ${process.env.LINE_TOKEN}` };
+    const [q, c] = await Promise.all([
+      fetch("https://api.line.me/v2/bot/message/quota", { headers: h }).then(r => r.json()),
+      fetch("https://api.line.me/v2/bot/message/quota/consumption", { headers: h }).then(r => r.json()),
+    ]);
+    const limit = q.type === "limited" ? q.value : null;
+    const used = c.totalUsage ?? null;
+    let groupSize = null;
+    if (process.env.WORK_GROUP_ID) {
+      try {
+        const g = await fetch(`https://api.line.me/v2/bot/group/${process.env.WORK_GROUP_ID}/members/count`, { headers: h }).then(r => r.json());
+        groupSize = g.count ?? null;
+      } catch (_) {}
+    }
+    res.json({
+      ok: true,
+      plan: q.type,                   // "limited" = มีเพดาน / "none" = ไม่จำกัด
+      limit, used,
+      remaining: limit != null && used != null ? Math.max(0, limit - used) : null,
+      groupMembers: groupSize,        // 1 push เข้ากลุ่ม ≈ นับเท่าจำนวนนี้
+      pushesLeft: limit != null && used != null && groupSize ? Math.floor(Math.max(0, limit - used) / groupSize) : null,
+      raw: { quota: q, consumption: c },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ★ v1.40: GET /api/admin/debug-service-account — ดู client_email (สำหรับ share Google Sheet)
 app.get("/api/admin/debug-service-account", requireAdmin, async (req, res) => {
   try {
