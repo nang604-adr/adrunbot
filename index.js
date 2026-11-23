@@ -786,6 +786,7 @@ app.post("/api/leave", rateLimitByUser, async (req, res) => {
         const msg = `📋 บันทึกการลา\n👤 ${name}\n📅 ${date} (วัน${dayLabel})\n${icon} ${leaveType}\n📝 ${reason || "-"}`;
         try {
           await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+          logGroupPush("leave", msg);  // ★ v1.44.2
           console.log(`📤 Push leave notification to group`);
         } catch (pushErr) {
           console.error("Push to group failed:", pushErr.message);
@@ -871,6 +872,7 @@ app.delete("/api/leave/:idx", async (req, res) => {
       const msg = `↩️ ยกเลิกการลา\n👤 ${target.name}\n📅 ${target.date} (วัน${dayLabel})\n${icon} ${target.leaveType}${byNote}`;
       try {
         await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+        logGroupPush("leave_cancel", msg);  // ★ v1.44.2
         console.log(`📤 Push cancel notification to group`);
       } catch (pushErr) {
         console.error("Push cancel failed:", pushErr.message);
@@ -2949,6 +2951,7 @@ async function pushLateIfNeeded(rec) {
       const msg = `${header}\n${line}`;
 
       await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+      logGroupPush("late", msg);  // ★ v1.44.2
       pushedLateToday.set(key, latest.startMin);
       console.log(`📤 Push late-arrival: ${name} → ${latest.startTime}`);
     } catch (e) {
@@ -3056,6 +3059,7 @@ async function sendDailyLeaveBroadcast() {
 
     const msg = parts.join("\n");
     await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    logGroupPush("daily_0830", msg);  // ★ v1.44.2
     console.log(`📤 Daily broadcast sent: ${leaves.length} leaves, ${lateList.length} late`);
     // ★ v1.39.2: เก็บ late ที่ประกาศแล้วลง dedup map — กันซ้ำกับ push ภายหลัง
     const dayKey = _lateDayKey(now);
@@ -3750,6 +3754,36 @@ app.get("/api/admin/queue-check", requireAdmin, async (req, res) => {
   }
 });
 
+// ★ v1.44.2: บันทึกทุกครั้งที่บอท push เข้ากลุ่ม → sheet Push_Log (ดูย้อนหลังว่ากินโควต้าไปกับอะไร)
+async function ensurePushLogSheet(sheets) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  if (meta.data.sheets.some(x => x.properties.title === "Push_Log")) return;
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID,
+    resource: { requests: [{ addSheet: { properties: { title: "Push_Log" } } }] } });
+  await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: "Push_Log!A1:D2", valueInputOption: "RAW",
+    resource: { values: [["📤 บอท push เข้ากลุ่ม (นับโควต้า LINE)", "", "", ""], ["time", "kind", "recipients", "preview"]] } });
+}
+let __groupSizeCache = { n: null, at: 0 };
+async function getGroupSize() {
+  if (Date.now() - __groupSizeCache.at < 6 * 3600 * 1000 && __groupSizeCache.n) return __groupSizeCache.n;
+  try {
+    const r = await fetch(`https://api.line.me/v2/bot/group/${process.env.WORK_GROUP_ID}/members/count`,
+      { headers: { Authorization: `Bearer ${process.env.LINE_TOKEN}` } }).then(x => x.json());
+    if (r.count) __groupSizeCache = { n: r.count, at: Date.now() };
+  } catch (_) {}
+  return __groupSizeCache.n;
+}
+function logGroupPush(kind, msg) {
+  (async () => {
+    const sheets = await getSheetsClient();
+    await ensurePushLogSheet(sheets);
+    const n = await getGroupSize();
+    const at = new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" });
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: "Push_Log!A:D", valueInputOption: "RAW",
+      resource: { values: [[at, kind, n || "", String(msg || "").replace(/\n/g, " ⏎ ").slice(0, 120)]] } });
+  })().catch(e => console.error("Push_Log failed:", e.message));
+}
+
 // ★ v1.44.2: GET /api/admin/line-quota — ดูโควต้าข้อความ LINE OA เดือนนี้ (ใช้ไป / ทั้งหมด)
 app.get("/api/admin/line-quota", requireAdmin, async (req, res) => {
   try {
@@ -3767,8 +3801,28 @@ app.get("/api/admin/line-quota", requireAdmin, async (req, res) => {
         groupSize = g.count ?? null;
       } catch (_) {}
     }
+    // ★ v1.44.2: ?daily=1 → จำนวนข้อความต่อวันเดือนนี้ (LINE insight — ตัวเลขของวันนี้ยังไม่มา จะได้ถึงเมื่อวาน)
+    let daily = null;
+    if (req.query.daily) {
+      const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));  // LINE ใช้วันที่ UTC+9
+      const days = [];
+      for (let d = 1; d <= now.getDate(); d++) {
+        days.push(`${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(d).padStart(2, "0")}`);
+      }
+      daily = await Promise.all(days.map(async ds => {
+        try {
+          const r = await fetch(`https://api.line.me/v2/bot/insight/message/delivery?date=${ds}`, { headers: h }).then(x => x.json());
+          if (r.status !== "ready") return { date: ds, status: r.status || "?" };
+          const out = { date: ds };
+          for (const [k, v] of Object.entries(r)) if (k !== "status" && v) out[k] = v;
+          return out;
+        } catch (e) { return { date: ds, error: e.message }; }
+      }));
+      daily = daily.filter(d => Object.keys(d).length > 1 && !(d.status === "unready"));
+    }
     res.json({
       ok: true,
+      daily,                          // ★ v1.44.2: apiPush = บอท push, apiReply = ตอบกลับ (ไม่นับโควต้า), broadcast = ส่งจากแอป OA
       plan: q.type,                   // "limited" = มีเพดาน / "none" = ไม่จำกัด
       limit, used,
       remaining: limit != null && used != null ? Math.max(0, limit - used) : null,
@@ -3827,6 +3881,7 @@ app.post("/api/admin/test-late-push", requireAdmin, async (req, res) => {
       : `👤 ${name} — จบ OT ${late.endTime} → เข้างาน ${late.startTime}`;
     const msg = `🧪 [TEST] 🌙 เข้างานสาย (พัก ${REST_HOURS} ชม.)\n${line}\n\nℹ️ ข้อความทดสอบ — ไม่บันทึกข้อมูลจริง`;
     await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    logGroupPush("test_late", msg);  // ★ v1.44.2
     console.log(`🧪 Test push late-arrival: ${name} → ${late.startTime}`);
     return res.json({ ok: true, wouldPush: true, pushed: late, input: { name, date, startTime, endTime, nightShift } });
   } catch (e) {
@@ -3875,6 +3930,7 @@ app.post("/api/admin/test-daily-broadcast", requireAdmin, async (req, res) => {
     parts.push("\nℹ️ ข้อความทดสอบ — ไม่กระทบระบบจริง");
     const msg = parts.join("\n");
     await client.pushMessage(process.env.WORK_GROUP_ID, { type: "text", text: msg });
+    logGroupPush("test_daily", msg);  // ★ v1.44.2
     console.log(`🧪 Test daily broadcast sent`);
     return res.json({ ok: true, leaves: leaves.length, late: lateList.length });
   } catch (e) {
