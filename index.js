@@ -2867,6 +2867,12 @@ app.listen(PORT, () => console.log(`🟢 OT Bot + LIFF on port ${PORT} (v1.1 B+)
 // ══════════════════════════════════════════════════════════════
 const REST_HOURS = Number(process.env.REST_HOURS) || 10;  // พักหลัง OT
 
+// ★ v1.44.1: OT เช้ามืด/เช้าก่อนเข้างาน (เริ่มก่อน 08:30 ของวันนั้น, ไม่ใช่ 🌙 กลางคืน, ไม่ข้ามเที่ยงคืน)
+//   = มาเริ่มงานเช้าแล้วทำงานต่อ → ไม่ต้องพัก ไม่แจ้งเข้าสาย
+function isEarlyMorningOT(rec, startMin, endMin) {
+  return !rec.nightShift && startMin < (8 * 60 + 30) && endMin >= startMin;
+}
+
 // ★ v1.39.1: คำนวณว่า OT 1 record ทำให้เข้าสายวันนี้ไหม
 function computeLateArrival(rec, now) {
   if (!rec.startTime || rec.startTime === "-" || !rec.endTime || rec.endTime === "-") return null;
@@ -2877,6 +2883,7 @@ function computeLateArrival(rec, now) {
   const toMin = t => { const [h, m] = (t || "").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
   const startMin = toMin(rec.startTime);
   let endMin = toMin(rec.endTime);
+  if (isEarlyMorningOT(rec, startMin, endMin)) return null;  // ★ v1.44.1
   if (endMin < startMin) endMin += 1440;
   if (rec.nightShift)    endMin += 1440;
   const endAbs = new Date(baseDate.getTime() + endMin * 60 * 1000);
@@ -2973,6 +2980,7 @@ async function getLateArrivalsForToday(sheets, now) {
 
     const startMin = toMin(r.startTime);
     let endMin = toMin(r.endTime);
+    if (isEarlyMorningOT(r, startMin, endMin)) continue;  // ★ v1.44.1: OT เช้าก่อนเข้างาน → ไม่นับ
     if (endMin < startMin) endMin += 1440;  // cross-midnight
     if (r.nightShift)      endMin += 1440;  // night shift = next day
 
